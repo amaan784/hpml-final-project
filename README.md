@@ -1,4 +1,4 @@
-# HPML Final Project - VLM Comparison on Industrial Thermal Images
+# HPML Final Project Model Exploration- VLM Comparison on Industrial Thermal Images
 
 Comparing two Vision-Language Models on thermal fault detection for induction motors.
 
