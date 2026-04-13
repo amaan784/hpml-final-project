@@ -1,0 +1,112 @@
+[
+  {
+    "id": 301,
+    "type": "Visual",
+    "text": "Inspect this drone-captured image of a wind turbine blade [image: turbine_def_001.jpg]. Is there any visible damage, erosion, or surface defect on this blade? Answer yes or no, then briefly describe what you see.",
+    "image_path": "data/turbine/defective/turbine_def_001.jpg",
+    "expected_tool": "vision.analyze_image",
+    "tool_args_extra": {
+      "question": "Is there any visible damage, erosion, or surface defect on this wind turbine blade? Answer yes or no, then briefly describe what you see."
+    },
+    "category": "Anomaly Detection Query",
+    "characteristic_form_label": "Custom",
+    "deterministic": true,
+    "characteristic_form": "The expected response should answer yes and identify visible defect(s) such as leading-edge erosion, surface damage, cracks, or coating loss. The response should NOT claim the blade appears clean, undamaged, or in good condition. A correct answer grounds the call in observable surface features.",
+    "ground_truth": {
+      "verdict": "defective",
+      "contains": "yes",
+      "must_not_contain": ["no defect", "no damage", "no visible", "appears clean", "no issues", "good condition"]
+    },
+    "group": "retrospective",
+    "entity": "Equipment",
+    "note": "Source: Blade30 dataset (Yang et al.); Deterministic binary defect-detection on a labeled-defective blade; Category: Anomaly Detection Query; Ground truth: defective per LabelMe shape label containing 'erosion' / 'damage' / 'crack'"
+  },
+  {
+    "id": 302,
+    "type": "Visual",
+    "text": "Inspect this drone-captured image of a wind turbine blade [image: turbine_norm_001.jpg]. Is there any visible damage, erosion, or surface defect on this blade? Answer yes or no, then briefly describe what you see.",
+    "image_path": "data/turbine/normal/turbine_norm_001.jpg",
+    "expected_tool": "vision.analyze_image",
+    "tool_args_extra": {
+      "question": "Is there any visible damage, erosion, or surface defect on this wind turbine blade? Answer yes or no, then briefly describe what you see."
+    },
+    "category": "Anomaly Detection Query",
+    "characteristic_form_label": "Custom",
+    "deterministic": true,
+    "characteristic_form": "The expected response should answer no and describe a clean blade surface with no visible defects. The response should NOT invent damage, erosion, cracks, or coating loss. Hedged language like 'might be damaged' or 'could be defective' should be scored down.",
+    "ground_truth": {
+      "verdict": "normal",
+      "contains": "no",
+      "must_not_contain": ["damaged", "erosion", "crack", "broken", "severe", "extensive defect"]
+    },
+    "group": "retrospective",
+    "entity": "Equipment",
+    "note": "Source: Blade30 dataset (Yang et al.); False-positive test on a labeled-clean blade (no defect labels in JSON annotations, only benign markings/tip OK); Category: Anomaly Detection Query; Ground truth: normal"
+  },
+  {
+    "id": 303,
+    "type": "Visual",
+    "text": "You are a wind farm maintenance inspector. Examine this image of a turbine blade [image: turbine_def_002.jpg]. Describe the surface condition in 2-3 sentences, naming any specific defect you observe (crack, erosion, surface damage, coating loss) and where on the blade it is located.",
+    "image_path": "data/turbine/defective/turbine_def_002.jpg",
+    "expected_tool": "vision.analyze_image",
+    "tool_args_extra": {
+      "question": "Describe the surface condition of this wind turbine blade in 2-3 sentences, naming any specific defect you observe (crack, erosion, surface damage, coating loss) and where on the blade it is located."
+    },
+    "category": "Inference Query",
+    "characteristic_form_label": "Custom",
+    "deterministic": false,
+    "characteristic_form": "The expected response should be a 2-3 sentence inspection note that (a) names a specific defect type from {erosion, crack, damage, coating loss, surface degradation} and (b) localizes the defect on the blade (leading edge, trailing edge, tip, mid-span, root). Generic 'the blade looks worn' without specifics scores low. The response must not claim the blade is clean or fault-free.",
+    "ground_truth": {
+      "verdict": "defective",
+      "contains": "erosion",
+      "must_not_contain": ["no defect", "appears clean", "no damage", "fault-free"]
+    },
+    "group": "retrospective",
+    "entity": "Equipment",
+    "note": "Source: Blade30 dataset (Yang et al.); Tests grounded freeform inspection - VLM should ground defect call in specific location + type, not hedge; Category: Inference Query; Ground truth: defective"
+  },
+  {
+    "id": 304,
+    "type": "Visual",
+    "text": "Examine this image of a wind turbine blade [image: turbine_def_003.jpg]. If there is damage, identify whether it is on the leading edge, trailing edge, blade tip, or surface center. Answer with one location label and a one-sentence reason. If there is no damage, say so explicitly.",
+    "image_path": "data/turbine/defective/turbine_def_003.jpg",
+    "expected_tool": "vision.analyze_image",
+    "tool_args_extra": {
+      "question": "If there is damage on this wind turbine blade, identify whether it is on the leading edge, trailing edge, blade tip, or surface center. Answer with one location label and a one-sentence reason. If there is no damage, say so explicitly."
+    },
+    "category": "Inference Query",
+    "characteristic_form_label": "Custom",
+    "deterministic": false,
+    "characteristic_form": "The expected response should specify one location from {leading edge, trailing edge, tip, surface center} and provide a one-sentence justification grounded in visible features. Most Blade30 erosion is on the leading edge, so 'leading edge' is the strongest answer; trailing edge or tip can be valid for specific images. Vague 'on the blade somewhere' or 'all over' answers fail.",
+    "ground_truth": {
+      "verdict": "defective",
+      "contains": "leading edge",
+      "must_not_contain": ["no damage", "no visible defect", "blade is clean"]
+    },
+    "group": "retrospective",
+    "entity": "Equipment",
+    "note": "Source: Blade30 dataset (Yang et al.); Localization task - VLMs are weak at blade anatomy and this scenario is most likely to degrade under aggressive quantization; Category: Inference Query; Ground truth: defective with leading-edge defect (most common in Blade30)"
+  },
+  {
+    "id": 305,
+    "type": "Visual",
+    "text": "Rate the overall structural condition of this wind turbine blade [image: turbine_norm_002.jpg] as good, fair, or poor based purely on its visual appearance, and justify in one sentence.",
+    "image_path": "data/turbine/normal/turbine_norm_002.jpg",
+    "expected_tool": "vision.analyze_image",
+    "tool_args_extra": {
+      "question": "Rate the overall structural condition of this wind turbine blade as good, fair, or poor based purely on its visual appearance, and justify in one sentence."
+    },
+    "category": "Decision Support Query",
+    "characteristic_form_label": "Custom",
+    "deterministic": false,
+    "characteristic_form": "The expected response should be a single rating from {good, fair, poor} and a one-sentence justification grounded in visible features. For this clean-blade image, 'good' is the calibrated answer; 'fair' is acceptable if the model points to specific minor wear; 'poor' is wrong unless the model cites a specific severe defect that is not actually present (hallucination).",
+    "ground_truth": {
+      "verdict": "good",
+      "contains": "good",
+      "must_not_contain": ["poor", "severe damage", "extensive damage", "critical condition"]
+    },
+    "group": "retrospective",
+    "entity": "Equipment",
+    "note": "Source: Blade30 dataset (Yang et al.); Tests instruction-following on a constrained ordinal scale; hallucination-bait if the model rates poor on a clean blade; Category: Decision Support Query; Ground truth: good condition"
+  }
+]
