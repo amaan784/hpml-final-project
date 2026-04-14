@@ -1,0 +1,36 @@
+# ── Required ────────────────────────────────────────────────────────────────────
+project_id  = "my-gcp-project-id"
+gcp_account = "your-email@columbia.edu"   # gcloud account for SSH commands
+
+# ── Region / Zone ──────────────────────────────────────────────────────────────
+# region = "us-central1"
+# zone   = "us-central1-a"
+
+# ── Compute ────────────────────────────────────────────────────────────────────
+# machine_type      = "e2-standard-4"   # 4 vCPU / 16 GB — good default
+# boot_disk_size_gb = 50
+# preemptible       = false             # set true to save ~70% cost (VM may be preempted)
+
+# ── Networking ─────────────────────────────────────────────────────────────────
+# If you already have a Cloud NAT from another project (e.g. HW1), set false
+# to avoid "NAT overlap" errors. Same for the IAP firewall rule.
+# create_nat          = false
+# create_iap_firewall = false
+
+# ── LLM Backends (provide at least one) ───────────────────────────────────────
+
+# Option A: IBM WatsonX
+# watsonx_apikey     = "your-watsonx-api-key"
+# watsonx_project_id = "your-watsonx-project-id"
+# watsonx_url        = "https://us-south.ml.cloud.ibm.com"
+
+# Option B: LiteLLM proxy (OpenAI, Anthropic, etc.)
+# litellm_api_key  = "sk-..."
+# litellm_base_url = "https://api.openai.com/v1"
+
+# ── CouchDB ───────────────────────────────────────────────────────────────────
+# couchdb_password = "password"
+
+# ── Storage ────────────────────────────────────────────────────────────────────
+# results_bucket_name    = ""   # auto-generated if empty
+# results_retention_days = 90   # 0 = keep forever
