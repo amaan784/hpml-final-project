@@ -1,0 +1,134 @@
+[
+  {
+    "id": 1,
+    "type": "Visual",
+    "text": "How many distinct power transformer units are visible across the four panels (TL, TR, BL, BR) of this image? Provide a single non-negative integer.",
+    "image_path": "data/transformer/1.jpg",
+    "expected_tool": "vision.analyze_image",
+    "tool_args_extra": {
+      "question": "How many distinct power transformer units are visible across the four panels (TL, TR, BL, BR) of this image? Provide a single non-negative integer."
+    },
+    "category": "Data Query",
+    "characteristic_form_label": "Custom",
+    "deterministic": true,
+    "characteristic_form": "The expected response should be a single concrete value - an integer count or a comma-separated list of panel labels (subset of TL, TR, BL, BR) - that matches what is visible in the stitched image.",
+    "ground_truth": {
+      "verdict": "transformer",
+      "contains": "transformer",
+      "must_not_contain": []
+    },
+    "group": "retrospective",
+    "entity": "Equipment",
+    "note": "Source: Eric's transformer scenarios; Original type: FMSA; Deterministic query with single correct answer; Category: Data Query; Visual inspection of stitched four-panel substation imagery; Kept as representative of equipment identification and count queries"
+  },
+  {
+    "id": 6,
+    "type": "Visual",
+    "text": "Examine all four panels for visible signs of weathering, ageing, or wear (rust streaks, faded paint, dirt accumulation). Which panel shows the most aged equipment?",
+    "image_path": "data/transformer/6.jpg",
+    "expected_tool": "vision.analyze_image",
+    "tool_args_extra": {
+      "question": "Examine all four panels for visible signs of weathering, ageing, or wear (rust streaks, faded paint, dirt accumulation). Which panel shows the most aged equipment?"
+    },
+    "category": "Anomaly Detection Query",
+    "characteristic_form_label": "Custom",
+    "deterministic": false,
+    "characteristic_form": "The expected response should report yes/no plus, when yes, the panel label(s) (TL/TR/BL/BR) and a brief description of the observed defect (rust, corrosion, crack, oil leak, weathering, foreign object). Must reference only visible evidence.",
+    "ground_truth": {
+      "verdict": "weathering",
+      "contains": "weather",
+      "must_not_contain": []
+    },
+    "group": "retrospective",
+    "entity": "Equipment",
+    "note": "Source: Eric's transformer scenarios; Original type: FMSA; Non-deterministic; Category: Anomaly Detection Query; Visual inspection of stitched four-panel substation imagery; Kept as representative of comparative anomaly detection across panels"
+  },
+  {
+    "id": 9,
+    "type": "Visual",
+    "text": "Describe the lighting conditions visible across the four panels - daylight, overcast, dusk, night, or mixed.",
+    "image_path": "data/transformer/9.jpg",
+    "expected_tool": "vision.analyze_image",
+    "tool_args_extra": {
+      "question": "Describe the lighting conditions visible across the four panels - daylight, overcast, dusk, night, or mixed."
+    },
+    "category": "Knowledge Query",
+    "characteristic_form_label": "Custom",
+    "deterministic": false,
+    "characteristic_form": "The expected response should describe the requested visual property across the four panels (TL, TR, BL, BR) in one to two sentences. Multiple defensible phrasings are accepted as long as the answer is grounded in visible content.",
+    "ground_truth": {
+      "verdict": "daylight",
+      "contains": "daylight",
+      "must_not_contain": []
+    },
+    "group": "retrospective",
+    "entity": "Site",
+    "note": "Source: Eric's transformer scenarios; Original type: IoT; Non-deterministic; Category: Knowledge Query; Visual inspection of stitched four-panel substation imagery; Kept as representative of site/environmental context queries"
+  },
+  {
+    "id": 10,
+    "type": "Visual",
+    "text": "If you had to prioritise one of these four panels for a maintenance walk-down today, which panel would you choose and why?",
+    "image_path": "data/transformer/10.jpg",
+    "expected_tool": "vision.analyze_image",
+    "tool_args_extra": {
+      "question": "If you had to prioritise one of these four panels for a maintenance walk-down today, which panel would you choose and why?"
+    },
+    "category": "Decision Support",
+    "characteristic_form_label": "Custom",
+    "deterministic": false,
+    "characteristic_form": "The expected response should select one panel label from {TL, TR, BL, BR} and provide a one- to two-sentence justification linking the visible state of the equipment to a maintenance prioritisation decision.",
+    "ground_truth": {
+      "verdict": "maintenance",
+      "contains": "maintenance",
+      "must_not_contain": []
+    },
+    "group": "prescriptive",
+    "entity": "Equipment",
+    "note": "Source: Eric's transformer scenarios; Original type: Workorder; Non-deterministic; Category: Decision Support; Visual inspection of stitched four-panel substation imagery; Kept as representative of maintenance prioritisation decisions"
+  },
+  {
+    "id": 14,
+    "type": "Visual",
+    "text": "Looking at the four panels (TL, TR, BL, BR), do any of them appear to be thermal or infrared imagery rather than a regular RGB photograph? If not, state that and infer the operational state from visible RGB cues.",
+    "image_path": "data/transformer/14.jpg",
+    "expected_tool": "vision.analyze_image",
+    "tool_args_extra": {
+      "question": "Looking at the four panels (TL, TR, BL, BR), do any of them appear to be thermal or infrared imagery rather than a regular RGB photograph? If not, state that and infer the operational state from visible RGB cues."
+    },
+    "category": "Complex Query",
+    "characteristic_form_label": "Custom",
+    "deterministic": false,
+    "characteristic_form": "The expected response should combine a panel-level identification with an inference about operational state - two to three sentences, grounded in visible cues (e.g., infrared heat distribution, surface condition, framing).",
+    "ground_truth": {
+      "verdict": "rgb",
+      "contains": "rgb",
+      "must_not_contain": []
+    },
+    "group": "retrospective",
+    "entity": "Equipment",
+    "note": "Source: Eric's transformer scenarios; Original type: multiagent; Non-deterministic; Category: Complex Query; Visual inspection of stitched four-panel substation imagery; Kept as unique modality-detection scenario requiring combined identification and inference"
+  },
+  {
+    "id": 20,
+    "type": "Visual",
+    "text": "Based only on visual inspection across the four panels, predict whether the equipment shown is likely to require maintenance within the next six months and justify your prediction in one to two sentences.",
+    "image_path": "data/transformer/20.jpg",
+    "expected_tool": "vision.analyze_image",
+    "tool_args_extra": {
+      "question": "Based only on visual inspection across the four panels, predict whether the equipment shown is likely to require maintenance within the next six months and justify your prediction in one to two sentences."
+    },
+    "category": "Prediction",
+    "characteristic_form_label": "Custom",
+    "deterministic": false,
+    "characteristic_form": "The expected response should give a yes/no maintenance-likelihood prediction with a one- to two-sentence justification grounded in visible wear, damage, or other operational indicators across the four panels.",
+    "ground_truth": {
+      "verdict": "maintenance",
+      "contains": "maintenance",
+      "must_not_contain": []
+    },
+    "group": "retrospective;predictive",
+    "entity": "Equipment",
+    "note": "Source: Eric's transformer scenarios; Original type: Workorder; Non-deterministic; Category: Prediction; Visual inspection of stitched four-panel substation imagery; Kept as the only forward-looking prognostic scenario"
+  }
+]
