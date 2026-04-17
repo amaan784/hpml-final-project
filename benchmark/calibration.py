@@ -1,9 +1,11 @@
-# Calibration corpora for AWQ/GPTQ quantization.
-# DOMAIN: 40 substation sentences. GENERIC: pulled from ultrachat_200k.
+# Calibration corpora for AWQ/GPTQ/SmoothQuant.
+# Domain corpus: substation + pump impeller + turbine blade. Generic: ultrachat.
+# Text-only because the recipe quantizes only the LLM tower (vision_tower
+# and multi_modal_projector are ignored).
 
 from typing import Iterable
 
-# Substation sentences. Same set as in quantize_llmcompressor_v010.py.
+# substation/transformer texts (same as in quantize_llmcompressor_v010.py)
 SUBSTATION_TEXTS: tuple[str, ...] = (
     "The image shows a substation transformer with cooling radiators on the side.",
     "Identify the primary piece of substation equipment visible: it appears to be a circuit breaker.",
@@ -66,7 +68,6 @@ def build_generic_corpus(
 
     raw = load_dataset(repo, split=split).shuffle(seed=seed).select(range(num_samples))
     out = []
-    # each pass handles the next item in the sequence
     for ex in raw:
         msgs = ex.get("messages", []) or []
         text = "\n".join((m.get("content") or "") for m in msgs)
@@ -75,7 +76,7 @@ def build_generic_corpus(
 
 
 def write_corpus_preview(texts: Iterable[str], out_path: str, head: int = 8) -> None:
-    # dump first `head` samples to out_path for debugging
+    # dump first `head` samples for debugging
     from pathlib import Path
 
     p = Path(out_path)
