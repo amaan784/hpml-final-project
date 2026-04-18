@@ -1,0 +1,112 @@
+[
+  {
+    "id": 201,
+    "type": "Visual",
+    "text": "Inspect this casting image of a submersible pump impeller [image: cast_ok_0_968.jpeg]. Is this part acceptable for use or should it be rejected? Describe the surface condition and any defects you observe.",
+    "image_path": "data/pumps/fine/cast_ok_0_968.jpeg",
+    "expected_tool": "vision.analyze_image",
+    "tool_args_extra": {
+      "question": "Inspect this casting image of a submersible pump impeller. Is this part acceptable for use or should it be rejected? Describe the surface condition and any defects you observe."
+    },
+    "category": "Decision Support Query",
+    "characteristic_form_label": "Custom",
+    "deterministic": false,
+    "characteristic_form": "The expected response should identify that the impeller is acceptable and recommend acceptance of this part. It should describe a uniform grey surface, smooth and intact outer rim with no chipping or material loss, symmetrical concentric ring geometry, and clean center bore. The response should NOT identify any casting defects such as blow holes, pinholes, cracks, burr, or shrinkage. The response should NOT misidentify the natural dark shadow inside the center bore as a void, wear, corrosion, overheating, or any other defect (the bore appearing dark is normal because it is an opening through the part).",
+    "ground_truth": {
+      "verdict": "accept",
+      "contains": "acceptable",
+      "must_not_contain": ["overheating", "void", "corrosion", "burr", "crack"]
+    },
+    "group": "retrospective",
+    "entity": "Pump",
+    "note": "Source: Kaggle casting product dataset; Non-deterministic query; Category: Decision Support Query; Dataset: casting_512x512/ok_front; Ground truth: OK; Calibrated against FP16 Qwen2.5-VL and Llama-3.2-Vision baseline"
+  },
+  {
+    "id": 202,
+    "type": "Visual",
+    "text": "Examine this top-view image of a cast submersible pump impeller [image: cast_ok_0_1091.jpeg]. Describe the surface finish and state whether this part passes quality inspection.",
+    "image_path": "data/pumps/fine/cast_ok_0_1091.jpeg",
+    "expected_tool": "vision.analyze_image",
+    "tool_args_extra": {
+      "question": "Examine this top-view image of a cast submersible pump impeller. Describe the surface finish and state whether this part passes quality inspection."
+    },
+    "category": "Decision Support Query",
+    "characteristic_form_label": "Custom",
+    "deterministic": false,
+    "characteristic_form": "The expected response should identify that the impeller passes quality inspection and recommend acceptance. It should describe the visible curved/concentric machining marks on the outer flat ring as normal post-processing artifacts, NOT as defects. The outer rim is intact without chipping. The geometry is symmetrical. The response should NOT misidentify the machining marks as cracks, scratches, or casting defects. The response should NOT misidentify the dark area inside the center bore as overheating, carbonization, burning, heat damage, voids, or wear (the bore is an opening through the part and appears dark because it is unlit, not because of a defect).",
+    "ground_truth": {
+      "verdict": "accept",
+      "contains": "passes",
+      "must_not_contain": ["overheating", "carbonization", "burning", "heat damage", "void"]
+    },
+    "group": "retrospective",
+    "entity": "Pump",
+    "note": "Source: Kaggle casting product dataset; Non-deterministic query; Category: Decision Support Query; Dataset: casting_512x512/ok_front; Ground truth: OK; Trap case: tests false-positive resistance against machining marks AND bore shadow; Qwen2.5-VL FP16 hallucinated 'overheating' in center bore on this image"
+  },
+  {
+    "id": 203,
+    "type": "Visual",
+    "text": "Inspect this casting image of a submersible pump impeller [image: cast_def_0_994.jpeg]. Is this part acceptable for use or should it be rejected? Describe any defects you observe.",
+    "image_path": "data/pumps/defective/cast_def_0_994.jpeg",
+    "expected_tool": "vision.analyze_image",
+    "tool_args_extra": {
+      "question": "Inspect this casting image of a submersible pump impeller. Is this part acceptable for use or should it be rejected? Describe any defects you observe."
+    },
+    "category": "Decision Support Query",
+    "characteristic_form_label": "Custom",
+    "deterministic": false,
+    "characteristic_form": "The expected response should identify that the impeller is defective and recommend rejection. It should locate the defects on the outer rim / perimeter of the part (NOT the inner bore). It should describe damage distributed across multiple sides of the rim including dark rough patches, irregular material buildup, and/or material loss/chipping along the edge. Acceptable variants include 'rim damage', 'edge damage', 'chunked perimeter', 'jagged outer edge', or specific defect types like burr or shrinkage. The response should NOT incorrectly locate the defect in the center bore. The response should NOT call this part acceptable.",
+    "ground_truth": {
+      "verdict": "reject",
+      "contains": "reject",
+      "must_not_contain": ["acceptable", "no defects"]
+    },
+    "group": "retrospective",
+    "entity": "Pump",
+    "note": "Source: Kaggle casting product dataset; Non-deterministic query; Category: Decision Support Query; Dataset: casting_512x512/def_front; Ground truth: Defective (severe rim damage); Calibrated: both Qwen-FP16 and Llama-FP16 incorrectly answered 'acceptable' on Q1 binary; Qwen-FP16 Q2 correctly rejected but partially miscoded location"
+  },
+  {
+    "id": 204,
+    "type": "Visual",
+    "text": "Examine this cast submersible pump impeller [image: cast_def_0_1055.jpeg]. Identify any casting defects present, describe their type and location, and recommend whether to accept or reject this part.",
+    "image_path": "data/pumps/defective/cast_def_0_1055.jpeg",
+    "expected_tool": "vision.analyze_image",
+    "tool_args_extra": {
+      "question": "Examine this cast submersible pump impeller. Identify any casting defects present, describe their type and location, and recommend whether to accept or reject this part."
+    },
+    "category": "Decision Support Query",
+    "characteristic_form_label": "Custom",
+    "deterministic": false,
+    "characteristic_form": "The expected response should identify that the impeller is defective and recommend rejection. The defect is located on the OUTER RIM (NOT the inner bore or center). The response should describe jagged, rough, or excess material along the outer perimeter consistent with burr (a casting defect from material escaping the mold parting line). The response may also note that the part outline appears slightly oval or irregular. The response should NOT locate the defect in the center bore. The response should NOT misidentify the dark area in the center bore as a hole, void, cavity, wear, or material loss (the bore is an opening through the part and is supposed to be there). Bonus credit if the response correctly names the defect type as burr or excess material.",
+    "ground_truth": {
+      "verdict": "reject",
+      "contains": "reject",
+      "must_not_contain": ["acceptable", "hole in center", "void in center"]
+    },
+    "group": "retrospective",
+    "entity": "Pump",
+    "note": "Source: Kaggle casting product dataset; Non-deterministic query; Category: Decision Support Query; Dataset: casting_512x512/def_front; Ground truth: Defective (burr along rim); Tests defect type identification; Calibrated: Llama-FP16 Q1 incorrectly described defect as 'hole in center'; Qwen-FP16 Q2 correctly rejected but located issue in inner bore"
+  },
+  {
+    "id": 205,
+    "type": "Visual",
+    "text": "Inspect this top-view image of a cast submersible pump impeller [image: cast_def_0_8687.jpeg]. Evaluate the condition of the part and recommend whether to accept or reject it.",
+    "image_path": "data/pumps/defective/cast_def_0_8687.jpeg",
+    "expected_tool": "vision.analyze_image",
+    "tool_args_extra": {
+      "question": "Inspect this top-view image of a cast submersible pump impeller. Evaluate the condition of the part and recommend whether to accept or reject it."
+    },
+    "category": "Decision Support Query",
+    "characteristic_form_label": "Custom",
+    "deterministic": false,
+    "characteristic_form": "The expected response should identify that the impeller is defective and recommend rejection. The defect is located on the OUTER RIM. The response should describe material loss, chipping, rough edges, or jagged irregularities along the outer perimeter, particularly visible on multiple sides (notably upper-left and right of the part). The damage compromises the structural boundary of the casting. The response should NOT locate the defect in the center bore. The response should NOT misidentify the dark area in the center bore as wear, corrosion, voids, or any defect (it is the natural appearance of the opening). The response should NOT call this part acceptable.",
+    "ground_truth": {
+      "verdict": "reject",
+      "contains": "reject",
+      "must_not_contain": ["acceptable", "wear", "corrosion"]
+    },
+    "group": "retrospective",
+    "entity": "Pump",
+    "note": "Source: Kaggle casting product dataset; Non-deterministic query; Category: Decision Support Query; Dataset: casting_512x512/def_front; Ground truth: Defective (rim chipping/material loss); Calibrated: Qwen-FP16 Q1 incorrectly answered 'acceptable'; Llama-FP16 Q2 contradicted its own Q1 and answered 'accept'"
+  }
+]
