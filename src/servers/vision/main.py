@@ -1,6 +1,6 @@
-# Vision MCP server scaffold.
-# Five tools: analyze_image, classify_equipment, detect_visual_defects,
-# assess_condition, read_gauge.
+# Vision MCP server - VLM-backed inspection tools.
+# Tools: analyze_image, classify_equipment, detect_visual_defects,
+# assess_condition, read_gauge. VLM backend picked from VLM_BASE_URL/VLM_MODEL.
 
 import logging
 import os
@@ -114,7 +114,8 @@ def _parse_defects(text):
 
 
 def _domain_phrase(image_ref, fallback="industrial equipment image"):
-    return image_loader.domain_hint_for(image_ref) or fallback
+    hint = image_loader.domain_hint_for(image_ref)
+    return hint or fallback
 
 
 mcp = FastMCP("vision")
@@ -134,13 +135,22 @@ async def analyze_image(
     question: str,
     max_tokens: int = 256,
 ) -> Union[AnalyzeResult, ErrorResult]:
-    # forward an arbitrary question + image to the VLM and return the raw answer
+    # free-form VLM call with a generic domain hint
     img, err = _safe_load(image_ref)
+
     if err is not None:
         return err
+
+    domain = _domain_phrase(image_ref)
+    primed_prompt = (
+        f"You are inspecting {domain}. Answer the user's question "
+        "grounded in the visible features of the image.\n\n"
+        f"User question: {question}"
+    )
+
     # keep the happy path obvious by catching failures here
     try:
-        text = await vlm_client.vlm_call(question, img, max_tokens=max_tokens)
+        text = await vlm_client.vlm_call(primed_prompt, img, max_tokens=max_tokens)
     except Exception as exc:
         logger.error("vlm_call failed: %s", exc)
         return ErrorResult(error=f"vlm_call_failed: {exc}")
@@ -170,7 +180,7 @@ async def classify_equipment(image_ref: str) -> Union[EquipmentResult, ErrorResu
             "primary piece of equipment in this image. Reply with the class "
             "name on the first line and a one-sentence reason on the second."
         )
-    # isolate errors so the rest of the call can bail cleanly
+    # keep the happy path obvious by catching failures here
     try:
         text = await vlm_client.vlm_call(prompt, img, max_tokens=128)
     except Exception as exc:
@@ -197,7 +207,7 @@ async def detect_visual_defects(image_ref: str) -> Union[DefectResult, ErrorResu
         "this image. Reply on a single line as a comma-separated list of "
         "short defect names. If no defects are visible, reply exactly 'none'."
     )
-    # wrap risky IO or RPC so we can surface a useful failure
+    # keep the happy path obvious by catching failures here
     try:
         text = await vlm_client.vlm_call(prompt, img, max_tokens=128)
     except Exception as exc:
@@ -221,7 +231,7 @@ async def assess_condition(image_ref: str) -> Union[ConditionResult, ErrorResult
         "condition: <good|degraded|critical>; confidence: <low|medium|high>; "
         "reason: <one sentence>"
     )
-    # keep the happy path obvious by catching failures here
+    # isolate errors so the rest of the call can bail cleanly
     try:
         text = await vlm_client.vlm_call(prompt, img, max_tokens=128)
     except Exception as exc:
@@ -245,7 +255,7 @@ async def read_gauge(image_ref: str) -> Union[GaugeResult, ErrorResult]:
         "with just the numeric reading and unit (e.g. '42.5 kV'). If no gauge "
         "is visible, reply 'no gauge'."
     )
-    # isolate errors so the rest of the call can bail cleanly
+    # keep the happy path obvious by catching failures here
     try:
         text = await vlm_client.vlm_call(prompt, img, max_tokens=64)
     except Exception as exc:
