@@ -1,6 +1,6 @@
-# HPML Final Project Model Exploration- VLM Comparison on Industrial Thermal Images
+# HPML Final Project Model Exploration - VLM Comparison on Pump Impeller Castings
 
-Comparing two Vision-Language Models on thermal fault detection for induction motors.
+Comparing two Vision-Language Models on visual defect detection of cast submersible pump impellers. This is the model-exploration phase for our AssetOpsBench Visual Inspection Agent extension (see the project proposal PDF in this repo for full context).
 
 ## Models
 
@@ -9,33 +9,36 @@ Comparing two Vision-Language Models on thermal fault detection for induction mo
 | [Qwen2.5-VL-7B-Instruct](https://huggingface.co/Qwen/Qwen2.5-VL-7B-Instruct) | 7B | 4-bit (bitsandbytes) |
 | [Llama-3.2-Vision-11B-Instruct](https://huggingface.co/meta-llama/Llama-3.2-11B-Vision-Instruct) | 11B | 4-bit (bitsandbytes) |
 
+Llama is our baseline; Qwen is the model we will AWQ-quantize and serve via vLLM in the next phase.
+
 ## Dataset
 
-Thermal images of induction motors from the [Mendeley dataset](https://data.mendeley.com/datasets/m4sbt8hbvk/3) (11 fault categories). We evaluate on 5 categories:
+Top-view images of cast submersible pump impellers, labeled as defective or acceptable. We keep a small curated subset in this repo under `pump_data/` so the exploration notebook can run end-to-end:
 
-1. Healthy motor
-2. Stator short circuit fault
-3. Stuck rotor
-4. Cooling fan failure
-5. Bearing fault (or another category of your choice)
+```
+pump_data/
+  defective/   # 7 images of castings with visible defects
+  fine/        # 7 images of acceptable castings
+```
+
+Defects visible in this subset include surface blow holes, burrs along the impeller vane edges, incomplete vane fill, and cracks / rough surface finish.
 
 ## Evaluation
 
-Each model is asked 3 questions per image:
+Each model is asked 2 questions per image:
 
-1. **Fault identification** - Is the equipment operating normally or is there a fault?
-2. **Hotspot detection** - Are there abnormal temperature patterns? Where and why?
-3. **Maintenance recommendation** - Should maintenance action be taken?
+1. **Binary judgement** - is this casting defective or acceptable?
+2. **Inspector-style analysis** - describe the surface condition, identify defects, and state accept / reject with a reason.
 
-Responses are scored on a 1-5 rubric and compared side-by-side.
+Responses are scored on a 1-5 rubric and compared side-by-side in the notebook. The 4-5 scenarios that best separate the two models become our AssetOpsBench-format scenarios (`scenarios/vlm_impeller_scenarios.json`).
 
 ## Hardware
 
-- **Target GPU:** NVIDIA L4 (24 GB VRAM)
+- **Target GPU:** NVIDIA L4 (24 GB VRAM) or any GPU with ~16 GB free
 - Both models loaded in 4-bit quantization via `bitsandbytes`
-- Models are loaded one at a time to fit in VRAM
+- Models are loaded one at a time and unloaded between runs to fit in VRAM
 
-## Setup
+## Setup (Colab)
 
 1. **Clone the repo**
    ```bash
@@ -43,31 +46,21 @@ Responses are scored on a 1-5 rubric and compared side-by-side.
    cd hpml-final-project
    ```
 
-2. **Download thermal images** from the [Mendeley dataset](https://data.mendeley.com/datasets/m4sbt8hbvk/3) and place them in a `thermal_images/` folder (or update the path in the notebook config cell).
+2. **Upload the images** to the Colab runtime. The notebook reads from `/content/defective_images` and `/content/okay_images`:
+   ```bash
+   mkdir -p /content/defective_images /content/okay_images
+   cp pump_data/defective/* /content/defective_images/
+   cp pump_data/fine/*      /content/okay_images/
+   ```
 
 3. **Accept the Llama license** at https://huggingface.co/meta-llama/Llama-3.2-11B-Vision-Instruct
 
-4. **Install dependencies**
+4. **Install dependencies** (the first notebook cell does this):
    ```bash
    pip install transformers accelerate torch qwen-vl-utils bitsandbytes pillow
    ```
 
-5. **Run the notebook**
-   ```
-   vlm_thermal_comparison.ipynb
-   ```
-   Log in to HuggingFace when prompted, then run cells sequentially.
-
-## Project Structure
-
-```
-├── vlm_thermal_comparison.ipynb   # Main experiment notebook
-├── thermal_images/                # Downloaded test images (not committed)
-├── qwen_results.json              # Qwen model outputs (generated)
-├── llama_results.json             # Llama model outputs (generated)
-├── vlm_comparison_scores.csv      # Scoring table (generated)
-└── README.md
-```
+5. **Run the notebook** `vlm_thermal_comparison.ipynb` top-to-bottom, logging into HuggingFace when prompted.
 
 ## License
 
