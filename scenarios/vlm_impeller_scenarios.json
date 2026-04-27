@@ -1,0 +1,83 @@
+{
+  "_meta": {
+    "description": "Visual Inspection Agent scenarios for AssetOpsBench. Target asset: cast submersible pump impeller (back-face / hub side, top view). Images live under pump_data/. Expected answers and image_path are vision-modality extensions to the base AssetOpsBench scenario schema (id, type, text, category, deterministic, characteristic_form, group, entity, note).",
+    "version": "0.2",
+    "modality": "vision",
+    "dataset": "pump_impeller_casting (defective vs fine, top view of back/hub face - vanes are NOT visible in these shots)",
+    "defect_types_seen_in_images": [
+      "burrs / flash around the outer rim",
+      "incomplete / irregular outer edge",
+      "surface chips or cracks on the rim",
+      "rough finish on the casting face"
+    ],
+    "scoring": "1-5 human rubric, see notebook",
+    "note_to_team": "Version 0.2: image picks and expected-answer text revised after visually inspecting every defective image. Scenarios 1-4 use clearly-labeled images; scenario 5 was re-picked to cast_def_0_8112.jpeg, which is the *least-obvious* defective image in the set (small localized flash only). After running the notebook and seeing where the models disagree, swap any scenario both models trivially solve. Target: 4-5 final scenarios that span obvious -> subtle -> hallucination-bait."
+  },
+  "scenarios": [
+    {
+      "id": "vlm_impeller_001",
+      "type": "visual_inspection",
+      "text": "This is a top-view image of a cast submersible pump impeller. Is this casting defective or acceptable? Answer in one sentence.",
+      "category": "defect_detection",
+      "deterministic": true,
+      "characteristic_form": "binary",
+      "group": "vlm_impeller",
+      "entity": "submersible_pump_impeller",
+      "image_path": "pump_data/defective/cast_def_0_1055.jpeg",
+      "expected_answer": "Defective. The casting shows heavy burrs / flash all the way around the outer rim and an irregular outer edge; it should be rejected.",
+      "note": "Clear defective case: heavy flash around the full circumference of the outer rim. Both models should get the binary question right; use it as a baseline sanity check."
+    },
+    {
+      "id": "vlm_impeller_002",
+      "type": "visual_inspection",
+      "text": "This is a top-view image of a cast submersible pump impeller. Is this casting defective or acceptable? Answer in one sentence.",
+      "category": "defect_detection",
+      "deterministic": true,
+      "characteristic_form": "binary",
+      "group": "vlm_impeller",
+      "entity": "submersible_pump_impeller",
+      "image_path": "pump_data/fine/cast_ok_0_1091.jpeg",
+      "expected_answer": "Acceptable. The outer rim is clean and circular, the cast face is smooth, and no burrs, flash, or surface pitting are visible; the part can be accepted.",
+      "note": "False-positive test on a clearly-acceptable part. Hedged answers ('might be defective', 'possibly acceptable') should be scored down."
+    },
+    {
+      "id": "vlm_impeller_003",
+      "type": "visual_inspection",
+      "text": "You are a quality inspector examining this cast submersible pump impeller. Describe the surface condition, identify any defects you observe, and state whether this part should be accepted or rejected.",
+      "category": "defect_analysis",
+      "deterministic": false,
+      "characteristic_form": "freeform",
+      "group": "vlm_impeller",
+      "entity": "submersible_pump_impeller",
+      "image_path": "pump_data/defective/cast_def_0_994.jpeg",
+      "expected_answer": "The outer rim shows significant burrs / flash (more pronounced on the left, upper, and lower edges) and an irregular, non-circular outer profile. The face itself looks reasonably smooth but the edge defects alone are disqualifying. A competent inspection report names at least one specific defect (burrs, flash, incomplete outer-edge fill), localizes it to the outer rim rather than vaguely 'the surface', and concludes REJECT.",
+      "note": "Tests whether the model can ground the verdict in specific, localized defects (which edge, what kind of defect) instead of generic 'looks bad' language. Grounded specificity is the main scoring axis."
+    },
+    {
+      "id": "vlm_impeller_004",
+      "type": "visual_inspection",
+      "text": "You are a quality inspector examining this cast submersible pump impeller. Describe the surface condition, identify any defects you observe, and state whether this part should be accepted or rejected.",
+      "category": "defect_analysis",
+      "deterministic": false,
+      "characteristic_form": "freeform",
+      "group": "vlm_impeller",
+      "entity": "submersible_pump_impeller",
+      "image_path": "pump_data/fine/cast_ok_0_968.jpeg",
+      "expected_answer": "The outer rim is clean and circular, the cast face is smooth with only normal machining marks, and the inner bore is well-formed. No burrs, flash, cracks, or surface pitting visible at this resolution. The part should be ACCEPTED. A strong answer also acknowledges that a single top-view image cannot rule out defects on the opposite face (where the vanes are) - this hedging is appropriate, not evasion.",
+      "note": "Hallucination-bait: tests whether the model invents defects on a clean part. Watch for confident false positives. A model that correctly qualifies the scope ('this view only') scores higher than one that either over-calls or under-qualifies."
+    },
+    {
+      "id": "vlm_impeller_005",
+      "type": "visual_inspection",
+      "text": "You are a quality inspector examining this cast submersible pump impeller. Describe the surface condition, identify any defects you observe, and state whether this part should be accepted or rejected.",
+      "category": "defect_analysis_subtle",
+      "deterministic": false,
+      "characteristic_form": "freeform",
+      "group": "vlm_impeller",
+      "entity": "submersible_pump_impeller",
+      "image_path": "pump_data/defective/cast_def_0_8112.jpeg",
+      "expected_answer": "Defective, but subtly so. Most of the outer rim is clean; however there is localized flash / irregular edge on the right side (roughly 2-3 o'clock) and a smaller defect on the left (roughly 9-10 o'clock). The main face is otherwise acceptable. A correct response points to the specific clock-position of the defect and concludes REJECT despite the overall 'clean' appearance; a response that says 'looks acceptable' is wrong here.",
+      "note": "Cherry-picked subtle case (selected after viewing all 7 defective images as the least-obvious one). This is the scenario most likely to separate Qwen from Llama and most likely to degrade under INT4 quantization - i.e. the one that earns its keep in the accuracy-vs-latency ablation."
+    }
+  ]
+}
