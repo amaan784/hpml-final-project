@@ -1,7 +1,4 @@
-# ReAct agent wrapping the vision MCP tools.
-# Loop: Thought -> Action -> Action Input -> Observation -> ... -> Final Answer.
-# Vision tools are called in-process via servers.vision.main.mcp.call_tool to
-# skip stdio subprocess overhead. Plan-Execute uses stdio for comparison.
+# ReAct agent on vision MCP tools. in-process tool calls for benchmark timing.
 
 import asyncio
 import json
@@ -13,18 +10,21 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
-# Make ``servers`` importable when running as ``python -m agent.react.<...>``
+# so `python -m agent.react...` finds src/
 _REPO = Path(__file__).resolve().parent.parent.parent.parent
 
 if str(_REPO / "src") not in sys.path:
     sys.path.insert(0, str(_REPO / "src"))
 
-from llm.base import LLMBackend
-from llm.vllm import GenerationMetrics, VLLMBackend
-from servers.vision import main as vision_main
+from llm.base import LLMBackend  # noqa: E402
+from llm.vllm import GenerationMetrics, VLLMBackend  # noqa: E402
+from servers.vision import main as vision_main  # noqa: E402
 
 _log = logging.getLogger(__name__)
 
+
+# Tool registry
+# Vision tools the agent can call. Names match the MCP server's @mcp.tool() decorations.
 VISION_TOOLS: dict[str, dict[str, Any]] = {
     "vision.analyze_image": {
         "description": (
@@ -56,7 +56,8 @@ VISION_TOOLS: dict[str, dict[str, Any]] = {
     },
 }
 
-def _format_tools_for_prompt():
+
+def _format_tools_for_prompt() -> str:
     # `format_tools_for_prompt` lives here. was getting too cramped inline.
     lines = []
     # each pass handles the next item in the sequence
@@ -65,34 +66,37 @@ def _format_tools_for_prompt():
         lines.append(f"  - {name}({args_str}): {spec['description']}")
     return "\n".join(lines)
 
+
+# Prompts
 REACT_SYSTEM_PROMPT = """\
-You are a visual inspection agent for industrial equipment. You answer the
-user's question by reasoning step-by-step and calling vision tools as needed.
+You are a visual inspection agent for industrial equipment.
+
+CRITICAL: You CANNOT see images directly. You can only read what tools tell
+you about an image. To answer any question about an image, you MUST first
+call a vision tool, THEN reason over the tool's Observation.
 
 Available tools:
 {tools}
 
-Respond using EXACTLY this format on each turn:
+You respond in turns. Each turn MUST be exactly one of these two response shapes.
 
-Thought: <your reasoning about what to do next>
-Action: <one of the tool names above, exactly>
+SHAPE A - call a tool (use this on the first turn, BEFORE any Observation):
+Thought: <one sentence on what to do>
+Action: <exactly one of the tool names above>
 Action Input: <a single-line JSON object with the tool's arguments>
 
-Then STOP. Do not write 'Observation:' yourself - the system will return
-the tool's output to you on the next turn.
-
-When you have enough information to answer the user, instead of an Action, write:
-
-Thought: I now know the final answer.
-Final Answer: <a complete answer to the original question>
+SHAPE B - final answer (use this on the second turn, AFTER an Observation has been returned to you):
+Thought: I now have the inspection result.
+Final Answer: <a complete answer to the user's question, grounded in the Observation>
 
 Rules:
-- Action MUST be exactly one of the listed tool names (case-sensitive).
-- Action Input MUST be valid JSON on a single line.
-- The image to analyze is given to you in the question - pass its path as
-  ``image_ref`` to every tool that needs it.
-- One or two tool calls is usually enough. Do not loop forever.
-- If the tools cannot answer the question, say so in Final Answer.
+- One tool call is enough. Use vision.analyze_image for freeform inspection
+  questions ("is this defective?", "describe the surface", "accept or reject?").
+- After writing 'Action Input:', STOP. The system writes the Observation.
+- After receiving an Observation, your next turn MUST be Final Answer
+  (Shape B). Do NOT call another tool unless the previous one errored.
+- Do NOT make up image paths or copy paths from instructions - use the
+  exact image_ref given to you in the user prompt.
 """
 
 REACT_USER_TEMPLATE = """\
@@ -104,6 +108,7 @@ Begin.
 """
 
 
+# Result dataclasses
 @dataclass
 class ReActStep:
     thought: str
@@ -172,6 +177,7 @@ class ReActResult:
         return sum(ttfts) / len(ttfts) if ttfts else None
 
 
+# Parsing helpers
 _THOUGHT_RE = re.compile(
     r"Thought:\s*(.+?)(?=\n(?:Action|Final Answer|Observation):|\Z)", re.DOTALL
 )
@@ -186,7 +192,7 @@ _ACTION_INPUT_RE = re.compile(
 _FINAL_ANSWER_RE = re.compile(r"\nFinal Answer:\s*(.+?)\Z", re.DOTALL)
 
 
-def _parse_action_input(raw):
+def _parse_action_input(raw: str) -> Optional[dict]:
     # `parse_action_input` lives here. was getting too cramped inline.
     text = raw.strip()
 
@@ -198,7 +204,7 @@ def _parse_action_input(raw):
             lines = lines[1:]
         text = "\n".join(lines).lstrip("json").strip()
 
-    # keep the happy path obvious by catching failures here
+    # wrap risky IO or RPC so we can surface a useful failure
     try:
         result = json.loads(text)
         if isinstance(result, dict):
@@ -218,8 +224,11 @@ def _parse_action_input(raw):
     return None
 
 
-def _parse_react_response(raw):
-    text = "\n" + raw  
+def _parse_react_response(
+    raw: str,
+) -> tuple[str, Optional[str], Optional[dict], Optional[str]]:
+    # drop fake Observation: lines. we inject real ones
+    text = "\n" + raw  # leading newline so the (?<=\n) regexes catch line-start matches
     obs_idx = text.find("\nObservation:")
 
     if obs_idx != -1:
@@ -244,10 +253,13 @@ def _parse_react_response(raw):
     return thought, None, None, None
 
 
-async def _call_vision_tool(tool_name, args):
+# Tool invocation
+async def _call_vision_tool(
+    tool_name: str, args: dict
+) -> tuple[str, Optional[str]]:
     # Async bit: `call_vision_tool` lives here. was getting too cramped inline.
     short_name = tool_name.split(".", 1)[1] if "." in tool_name else tool_name
-    # keep the happy path obvious by catching failures here
+    # wrap risky IO or RPC so we can surface a useful failure
     try:
         contents, _ = await vision_main.mcp.call_tool(short_name, args)
     except Exception as exc:
@@ -257,7 +269,7 @@ async def _call_vision_tool(tool_name, args):
         return "", "tool returned empty contents"
 
     text = contents[0].text or ""
-    # wrap risky IO or RPC so we can surface a useful failure
+    # If the tool returned an MCP error result, surface it
     try:
         payload = json.loads(text)
         if isinstance(payload, dict) and "error" in payload:
@@ -267,6 +279,7 @@ async def _call_vision_tool(tool_name, args):
     return text, None
 
 
+# ReAct runner
 class ReActRunner:
     def __init__(
         self,
@@ -286,7 +299,6 @@ class ReActRunner:
         return self._llm.generate(prompt), None
 
     async def run(self, question: str, image_ref: str) -> ReActResult:
-        # run the ReAct loop on a single (question, image_ref) pair
         t_start = time.perf_counter()
         system_prompt = REACT_SYSTEM_PROMPT.format(tools=_format_tools_for_prompt())
         user_prompt = REACT_USER_TEMPLATE.format(
@@ -318,25 +330,41 @@ class ReActRunner:
                 final_answer = fa
                 break
 
-            # only enter this block when the guard passes
             if action is None or action_input is None:
-                # parse failure - give up gracefully
-                steps.append(
-                    ReActStep(
-                        thought=thought or response_text[:200],
-                        action=None,
-                        action_input=None,
-                        observation=None,
-                        llm_metrics=llm_metrics,
-                        tool_error="parse_failure",
+                # iter0 often forgets Action. default to analyze_image
+                if iteration == 0 and not any(s.action for s in steps):
+                    _log.warning(
+                        "ReAct parse failed at iter 0 - falling back to "
+                        "vision.analyze_image with the original question."
                     )
-                )
-                error = f"parse_failure at iteration {iteration}"
-                final_answer = (
-                    thought.strip() or response_text.strip()[:500] or "(unparseable)"
-                )
-                break
+                    action = "vision.analyze_image"
+                    action_input = {
+                        "image_ref": image_ref,
+                        "question": question,
+                    }
+                    if not thought:
+                        thought = (
+                            "(parse-fallback) I need to call vision.analyze_image "
+                            "to inspect the image."
+                        )
+                else:
+                    steps.append(
+                        ReActStep(
+                            thought=thought or response_text[:200],
+                            action=None,
+                            action_input=None,
+                            observation=None,
+                            llm_metrics=llm_metrics,
+                            tool_error="parse_failure",
+                        )
+                    )
+                    error = f"parse_failure at iteration {iteration}"
+                    final_answer = (
+                        thought.strip() or response_text.strip()[:500] or "(unparseable)"
+                    )
+                    break
 
+            # only enter this block when the guard passes
             if action not in VISION_TOOLS:
                 obs = (
                     f"Error: '{action}' is not a valid tool. "
@@ -358,8 +386,12 @@ class ReActRunner:
                 )
                 continue
 
-            # auto-inject image_ref if the model forgot it
-            if "image_ref" not in action_input:
+            # pin image_ref / question for analyze_image (model drifts otherwise)
+            if action == "vision.analyze_image":
+                action_input["image_ref"] = image_ref
+                if not action_input.get("question") or not isinstance(action_input.get("question"), str):
+                    action_input["question"] = question
+            elif "image_ref" not in action_input:
                 action_input["image_ref"] = image_ref
 
             t_tool = time.perf_counter()
@@ -377,7 +409,6 @@ class ReActRunner:
                     tool_error=tool_err,
                 )
             )
-            # truncate observation in the scratchpad to keep context bounded
             obs_for_scratchpad = obs_text if len(obs_text) < 1500 else (obs_text[:1500] + "...[truncated]")
             scratchpad += (
                 f"\nThought: {thought}\nAction: {action}\n"
@@ -402,6 +433,6 @@ class ReActRunner:
         )
 
     def run_sync(self, question: str, image_ref: str) -> ReActResult:
-        # sync wrapper for one-off CLI use
+        # does `run_sync`, split out so we can reuse it from a few call sites.
         return asyncio.run(self.run(question, image_ref))
 
