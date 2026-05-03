@@ -1,6 +1,4 @@
-# HPML metrics collector (basic).
-# Reads summary.csv and prints per-variant aggregates.
-# TODO: add vLLM Prometheus scraping and nvidia-smi VRAM collection.
+# HPML metrics: read summary.csv and print per-variant aggregates.
 
 import argparse
 import csv
@@ -18,7 +16,6 @@ def _summary_for_variant(variant):
     rows = []
 
     with SUMMARY_CSV.open() as f:
-        # each pass handles the next item in the sequence
         for row in csv.DictReader(f):
             if row.get("variant") == variant:
                 rows.append(row)
