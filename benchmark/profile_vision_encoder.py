@@ -2,6 +2,7 @@
 # Run on the GCP VM with the model weights cached:
 #   python benchmark/profile_vision_encoder.py
 #   tensorboard --logdir tb
+# Note: profile_memory=True (vs Eric's version) for the report's memory chart.
 
 import argparse
 import os
@@ -15,7 +16,7 @@ from servers.vision import image_loader
 
 
 def main():
-    # Lightweight CLI wrapper — heavy torch imports delayed until argparse finishes.
+    # CLI/helper entry for `main`.
     p = argparse.ArgumentParser()
     p.add_argument("--model", default=os.environ.get("VLM_MODEL", "Qwen/Qwen2.5-VL-7B-Instruct"))
     p.add_argument("--image", default="hf://substation/train/0")
@@ -26,7 +27,6 @@ def main():
     from transformers import AutoModelForVision2Seq, AutoProcessor
 
     print(f"==> Loading {args.model} (FP16) ...")
-    # Processor aligns images with whatever normalization the HF config expects.
     proc = AutoProcessor.from_pretrained(args.model, trust_remote_code=True)
     model = AutoModelForVision2Seq.from_pretrained(
         args.model, trust_remote_code=True, torch_dtype=torch.float16, device_map="cuda"
@@ -34,14 +34,13 @@ def main():
     model.eval()
 
     img = image_loader.load_image(args.image)
-    # Build a multimodal tensor batch exactly like downstream inference does.
     inputs = proc(images=img, text="dummy", return_tensors="pt").to("cuda")
 
-    # TensorBoard hook captures CUDA kernels for visual encoder only.
     with torch.profiler.profile(
         activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
         on_trace_ready=torch.profiler.tensorboard_trace_handler(args.tb_dir),
         record_shapes=True,
+        profile_memory=True,
         with_stack=False,
     ) as prof:
         with torch.no_grad():
