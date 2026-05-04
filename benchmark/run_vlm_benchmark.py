@@ -1,8 +1,31 @@
-# HPML vision-MCP benchmark harness.
-# Drives scenarios through the vision MCP server against vLLM and writes
-# per-row results to results/summary.csv plus optional WandB logging.
-# Run once per variant. vLLM is started separately by serve_vllm.sh.
-# Env: VLM_BASE_URL, VLM_MODEL, WANDB_PROJECT (set WANDB_DISABLED=true to skip).
+"""HPML vision-MCP benchmark harness.
+
+Drives the hand-authored scenarios under ``src/scenarios/local/vision_*.json``
+through the vision MCP server against a vLLM-served VLM, writes per-row
+results to ``results/summary.csv``, and emits an optional WandB run.
+
+Designed to be run REPEATEDLY, once per variant, with the variant tag passed
+on the command line - vLLM itself is started separately by ``serve_vllm.sh``.
+This avoids the harness needing GPU privileges and keeps profiling clean.
+
+Accuracy is NOT scored at bench time (auto-scorer was retired 2026-05-07).
+Run ``python -m benchmark.llm_judge`` after benchmarking to populate
+``results/llm_judge.csv`` with the LLM-as-judge scores.
+
+Usage:
+    # On the GCP VM, with vLLM serving the FP16 baseline on :8000
+    python benchmark/run_vlm_benchmark.py --variant L0_baseline
+    # Defaults to all vision_*.json scenarios. pass --scenarios to override.
+    python benchmark/run_vlm_benchmark.py --variant L1_awq_w4a16_domain \
+        --scenarios src/scenarios/local/vision_pump_scenarios.json
+
+Env:
+    VLM_BASE_URL  default http://localhost:8000/v1
+    VLM_MODEL     default Qwen/Qwen2.5-VL-7B-Instruct
+    WANDB_PROJECT default hpml-assetopsbench-vlm  (set WANDB_DISABLED=true to skip)
+"""
+
+from __future__ import annotations
 
 import argparse
 import asyncio
@@ -14,56 +37,55 @@ import time
 from pathlib import Path
 from typing import Any
 
-# need _REPO on sys.path for `from benchmark import variants` below.
-# need _REPO/src for the servers/llm packages.
+# Make ``servers``, ``llm``, and ``benchmark`` importable even when run from a fresh shell.
+# Need _REPO on sys.path for ``from benchmark import variants`` below.
+# need _REPO/src for the ``servers``/``llm`` packages.
 _REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_REPO / "src"))
 sys.path.insert(0, str(_REPO))
 
-from servers.vision import image_loader, vlm_client, main as vision_main
-from benchmark import variants as variant_registry
-from benchmark.wandb_logger import log_variant_run
+from servers.vision import image_loader, vlm_client, main as vision_main  # noqa: E402
+from benchmark import variants as variant_registry  # noqa: E402
+from benchmark.wandb_logger import log_variant_run  # noqa: E402
 
-SCENARIOS_PATH = _REPO / "src" / "scenarios" / "local" / "vision_utterance.json"
+SCENARIOS_DIR = _REPO / "src" / "scenarios" / "local"
 RESULTS_DIR = _REPO / "results"
 SUMMARY_CSV = RESULTS_DIR / "summary.csv"
 
 
-def _score_equipment(predicted, gt):
-    return int(predicted.get("equipment_type", "").lower() == gt.get("equipment_type", "").lower())
+def _default_scenario_paths() -> list[Path]:
+    """All ``vision_*.json`` scenarios under src/scenarios/local/.
+
+    Used when ``--scenarios`` is not passed. Sorted for stable run-to-run
+    ordering (so per-scenario rows appear in the same order in summary.csv).
+    """
+    return sorted(SCENARIOS_DIR.glob("vision_*.json"))
 
 
-def _score_defects(predicted, gt):
-    # Helper for `score_defects`.
-    expected_any = [d.lower() for d in gt.get("defects_any", [])]
-    found = {d.lower() for d in predicted.get("defects", [])}
-    return int(any(any(e in f or f in e for f in found) for e in expected_any))
+# Scenario runner
+#
+# NOTE: The substring auto-scorer that used to live here was retired
+# 2026-05-07 in favour of LLM-as-judge (``benchmark/llm_judge.py``). The
+# old scorer code is preserved at ``_unused/scoring/auto_scorer.py`` for
+# reference. ``correct`` is no longer written to ``summary.csv`` -- accuracy
+# comes from ``llm_judge.csv`` (post-hoc, populated by running
+# ``python -m benchmark.llm_judge``).
 
 
-def _score_condition(predicted, gt):
-    return int(predicted.get("condition", "") == gt.get("condition", ""))
+async def _run_scenario(scenario: dict) -> dict:
+    """Run one scenario directly through the vision MCP tool functions.
 
+    We skip the planner LLM because each scenario already names the tool to
+    invoke (``expected_tool``). This keeps measured latency to the VLM call
+    itself and removes orchestrator noise from the benchmark.
 
-SCORERS = {
-    "Equipment Identification": _score_equipment,
-    "Defect Detection": _score_defects,
-    "Condition Assessment": _score_condition,
-}
-
-def _score_custom(predicted, gt):
-    # Helper for `score_custom`.
-    needle = gt.get("contains", "").lower()
-    haystack = (predicted.get("answer", "") or predicted.get("raw_response", "")).lower()
-    return int(bool(needle) and needle in haystack)
-
-SCORERS["Custom"] = _score_custom
-SCORERS["Decision Support Query"] = _score_custom
-
-
-async def _run_scenario(scenario):
-    # Async work for `run_scenario`.
+    Returns the per-scenario row WITHOUT a ``correct`` field -- accuracy
+    grading happens post-hoc via ``benchmark/llm_judge.py`` against the
+    scenario's ``characteristic_form`` rubric.
+    """
     tool_name = scenario["expected_tool"].split(".", 1)[1]
     args = {"image_ref": scenario["image_path"]}
+    # Allow teammates to pass per-scenario tool args (e.g. 'question' for analyze_image).
     args.update(scenario.get("tool_args_extra", {}))
 
     t0 = time.perf_counter()
@@ -71,13 +93,9 @@ async def _run_scenario(scenario):
     dt_ms = (time.perf_counter() - t0) * 1000
 
     payload = json.loads(contents[0].text)
-    correct = 0
-
-    # runs when 'error' not in payload
-    if "error" not in payload:
-        scorer = SCORERS.get(scenario["category"])
-        if scorer:
-            correct = scorer(payload, scenario["ground_truth"])
+    # Different vision tools name the response field differently:
+    #   analyze_image       -> 'answer'
+    #   classify_equipment, detect_visual_defects, assess_condition, read_gauge -> 'raw_response'
     response_text = (
         payload.get("raw_response")
         or payload.get("answer")
@@ -89,28 +107,25 @@ async def _run_scenario(scenario):
         "characteristic_form": scenario["characteristic_form"],
         "tool": tool_name,
         "e2e_ms": round(dt_ms, 2),
-        "correct": correct,
         "error": payload.get("error", ""),
         "raw_response": response_text[:1500],
     }
 
 
-async def _run_all(scenarios):
-    # Async `run_all` isolated for readability.
+async def _run_all(scenarios: list[dict]) -> list[dict]:
+    # Run scenarios serially so stdout + exception traces stay human-readable.
     rows = []
-    # each pass handles the next item in the sequence
     for sc in scenarios:
         print(f"  -> #{sc['id']} {sc['category']}", flush=True)
         try:
             row = await _run_scenario(sc)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             row = {
                 "scenario_id": sc["id"],
                 "category": sc["category"],
                 "characteristic_form": sc["characteristic_form"],
                 "tool": sc["expected_tool"],
                 "e2e_ms": -1,
-                "correct": 0,
                 "error": f"runner_exception: {exc}",
                 "raw_response": "",
             }
@@ -118,8 +133,14 @@ async def _run_all(scenarios):
     return rows
 
 
-def _scrape_vllm_metrics(base_url):
-    # CLI/helper entry for `scrape_vllm_metrics`.
+# vLLM /metrics scraping
+def _scrape_vllm_metrics(base_url: str) -> dict[str, Any]:
+    """Best-effort: pull a few key counters from vLLM's Prometheus /metrics.
+
+    Returns an empty dict when the endpoint is unreachable so the harness
+    still records timing on a Mac without vLLM.
+    """
+    # Prometheus scrape is optional — dev laptops often lack a running vLLM.
     try:
         import requests
         url = base_url.rstrip("/v1") + "/metrics"
@@ -132,12 +153,11 @@ def _scrape_vllm_metrics(base_url):
             "vllm:prefix_cache_hit_rate",
             "vllm:time_to_first_token_seconds",
         )
-        out = {}
-        # each pass handles the next item in the sequence
+        out: dict[str, float] = {}
+        # Naive line scan: treat /metrics as prometheus text exposition.
         for line in resp.text.splitlines():
             if line.startswith("#") or not line.strip():
                 continue
-            # each pass handles the next item in the sequence
             for p in wanted_prefixes:
                 if line.startswith(p):
                     name, _, val = line.rpartition(" ")
@@ -146,18 +166,25 @@ def _scrape_vllm_metrics(base_url):
                     except ValueError:
                         pass
         return out
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         return {"_metrics_error": str(exc)}
 
 
+# CSV + WandB sinks
 CSV_FIELDS = [
     "variant", "scenario_id", "category",
-    "tool", "e2e_ms", "correct", "error",
+    "tool", "e2e_ms", "error",
     "raw_response",
+    # `correct` (auto-scorer output) was removed 2026-05-07 -- accuracy now
+    # comes from results/llm_judge.csv (post-hoc, via benchmark/llm_judge.py).
+    # `characteristic_form` (rubric text) is dropped from CSV -- it bloats
+    # every row by 500-1500 chars. the rubric lives in the source scenarios
+    # JSON and is read directly by llm_judge.py.
 ]
 
 
-def _append_csv(rows, variant):
+def _append_csv(rows: list[dict], variant: str) -> None:
+    # Append-only CSV so teammates can compare repeated bench runs locally.
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     new_file = not SUMMARY_CSV.exists()
     with SUMMARY_CSV.open("a", newline="") as fh:
@@ -168,8 +195,14 @@ def _append_csv(rows, variant):
             w.writerow({k: row.get(k, "") if k != "variant" else variant for k in CSV_FIELDS})
 
 
-def main():
-    # CLI/helper entry for `main`.
+# WandB logging delegated to ``benchmark.wandb_logger.log_variant_run`` --
+# richer schema (family/model_family tags, p50/p95/p99 percentiles, GPU
+# system metrics auto-collected at 2s sample rate).
+
+
+# CLI
+def main() -> int:
+    # Tie CLI flags -> env vars consumed by AsyncOpenAI + PIL resize helpers.
     parser = argparse.ArgumentParser()
     parser.add_argument("--variant", required=True,
                         help="Variant name from the registry (see "
@@ -181,25 +214,32 @@ def main():
                              "run teammate sets together (defaults to vision_utterance.json).")
     args = parser.parse_args()
 
-    # export VLM_MODEL + VLM_IMAGE_MAX_SIDE so vlm_client honors the variant
-    # settings even though vLLM is started in a separate process.
+    # Resolve the variant from the registry. Exports VLM_MODEL +
+    # VLM_IMAGE_MAX_SIDE so vlm_client honors the variant's settings even
+    # though vLLM itself is started in a separate process.
     variant = variant_registry.get(args.variant)
     resolved_model = variant_registry.resolve_model_id(variant.model_id)
     os.environ.setdefault("VLM_MODEL", resolved_model)
     os.environ["VLM_IMAGE_MAX_SIDE"] = str(variant.image_max_side)
-    # process records in deterministic order
     for k, v in variant.env.items():
         os.environ.setdefault(k, v)
 
-    paths = [Path(p) for p in (args.scenarios or [str(SCENARIOS_PATH)])]
-    scenarios = []
-    # process records in deterministic order
+    # Honour explicit `--scenarios` overrides; otherwise glob the repo defaults.
+    if args.scenarios:
+        paths = [Path(p) for p in args.scenarios]
+    else:
+        paths = _default_scenario_paths()
+        if not paths:
+            print(f"==> ERROR: no vision_*.json scenarios found under {SCENARIOS_DIR}",
+                  file=sys.stderr)
+            return 2
+    scenarios: list[dict] = []
     for p in paths:
         loaded = json.loads(p.read_text())
-        # skip the leading metadata stub in template files
+        # Skip the leading metadata stub used in template files.
         scenarios.extend(s for s in loaded if "id" in s and isinstance(s["id"], int))
 
-    # runs when args.limit is not None
+    # Optional truncate for laptops that only want a preview slice.
     if args.limit is not None:
         scenarios = scenarios[: args.limit]
 
@@ -227,13 +267,13 @@ def main():
         },
     )
 
-    accuracy = sum(r["correct"] for r in rows) / max(len(rows), 1)
     e2e_vals = [r["e2e_ms"] for r in rows if r["e2e_ms"] > 0]
     avg_ms = sum(e2e_vals) / len(e2e_vals) if e2e_vals else 0.0
-    print(f"==> {variant.name}: accuracy={accuracy:.2f}  avg_e2e={avg_ms:.0f} ms  "
-          f"({len(rows)} scenarios)  -> {SUMMARY_CSV}")
+    print(f"==> {variant.name}: avg_e2e={avg_ms:.0f} ms  "
+          f"({len(rows)} scenarios, no auto-scorer)  -> {SUMMARY_CSV}")
+    print(f"==> Run `uv run python -m benchmark.llm_judge` to grade accuracy.")
 
-    # runs when wandb_url
+    # WandB may be disabled globally — print URL only when a run actually synced.
     if wandb_url:
         print(f"==> wandb run:    {wandb_url}")
     return 0
