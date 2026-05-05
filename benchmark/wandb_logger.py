@@ -1,5 +1,4 @@
-# Centralised WandB logging for the HPML benchmark harness.
-# Lazy-imports wandb. No-op if WANDB_DISABLED=true or wandb is not installed.
+# Optional wandb hooks. skipped if WANDB_DISABLED or import fails.
 
 import os
 import time
@@ -7,7 +6,7 @@ from contextlib import contextmanager
 from typing import Any, Iterable, Optional
 
 
-def _wandb_disabled():
+def _wandb_disabled() -> bool:
     return os.environ.get("WANDB_DISABLED", "").lower() in ("1", "true", "yes")
 
 
@@ -15,7 +14,7 @@ def _try_import_wandb():
     # `try_import_wandb` lives here so benchmark steps read top-down.
     if _wandb_disabled():
         return None
-    # chart helpers can fail on minimal CI images — skip instead of crashing
+    # wandb is optional in student environments — ignore import failures
     try:
         import wandb
         return wandb
@@ -24,11 +23,10 @@ def _try_import_wandb():
 
 
 def _system_metrics_settings(wb):
-    # bump the GPU/CPU stats sampling rate from ~10s default down to 2s
+    # Shared `system_metrics_settings` logic reused by multiple benchmark paths.
     try:
         return wb.Settings(_stats_sample_rate_seconds=2)
     except Exception:
-        # older wandb versions reject the kwarg. fall back to defaults
         try:
             return wb.Settings()
         except Exception:
@@ -46,14 +44,13 @@ SCENARIO_COLUMNS = (
 
 
 def log_variant_run(
-    variant,
-    scenarios,
-    rows,
-    vllm_metrics,
-    project=None,
-    extra_config=None,
-):
-    # log per-scenario rows + aggregate metrics + vLLM /metrics. returns run URL
+    variant: Any,
+    scenarios: list[dict],
+    rows: list[dict],
+    vllm_metrics: dict[str, Any],
+    project: Optional[str] = None,
+    extra_config: Optional[dict[str, Any]] = None,
+) -> Optional[str]:
     wb = _try_import_wandb()
 
     # wandb client missing — skip logging side-effects quietly
@@ -92,9 +89,9 @@ def log_variant_run(
         init_kwargs["settings"] = settings
     run = wb.init(**init_kwargs)
 
-    # accuracy is computed post-hoc by benchmark/llm_judge.py, not here
+    # latency table here. accuracy comes from llm_judge later
     table_rows = []
-    # each pass handles the next item in the sequence
+    # process records in deterministic order
     for sc, row in zip(scenarios, rows):
         e2e = row.get("e2e_ms", 0) or 0
         table_rows.append([
@@ -109,14 +106,14 @@ def log_variant_run(
             "scenario/e2e_ms": float(e2e) if e2e and e2e > 0 else None,
         })
 
-    # latency aggregates only (no accuracy at bench time)
+    # rollups only at bench time
     valid_e2e = [float(r["e2e_ms"]) for r in rows if r.get("e2e_ms") and float(r["e2e_ms"]) > 0]
     e2e_mean = sum(valid_e2e) / len(valid_e2e) if valid_e2e else 0.0
     e2e_p50 = sorted(valid_e2e)[len(valid_e2e) // 2] if valid_e2e else 0.0
     e2e_p95 = sorted(valid_e2e)[max(0, int(0.95 * (len(valid_e2e) - 1)))] if valid_e2e else 0.0
     e2e_max = max(valid_e2e) if valid_e2e else 0.0
 
-    summary = {
+    summary: dict[str, Any] = {
         "e2e_mean_ms": float(e2e_mean),
         "e2e_p50_ms": float(e2e_p50),
         "e2e_p95_ms": float(e2e_p95),
@@ -128,11 +125,10 @@ def log_variant_run(
         if isinstance(v, (int, float)):
             summary[f"vllm/{k}"] = v
 
-    # each pass handles the next item in the sequence
     for k, v in summary.items():
         run.summary[k] = v
 
-    # wandb is optional in student environments — ignore import failures
+    # chart helpers can fail on minimal CI images — skip instead of crashing
     try:
         table = wb.Table(columns=list(SCENARIO_COLUMNS), data=table_rows)
         run.log({"scenarios_table": table, **summary})
@@ -144,13 +140,12 @@ def log_variant_run(
     return url
 
 
-# cross-variant summary helpers
-
+# Cross-variant summary helpers
 @contextmanager
 def comparison_run(
-    project=None,
-    name="all-variants-summary",
-    config=None,
+    project: Optional[str] = None,
+    name: str = "all-variants-summary",
+    config: Optional[dict[str, Any]] = None,
 ):
     wb = _try_import_wandb()
 
@@ -173,7 +168,7 @@ def comparison_run(
     if settings is not None:
         init_kwargs["settings"] = settings
     run = wb.init(**init_kwargs)
-    # chart helpers can fail on minimal CI images — skip instead of crashing
+    # isolate errors so the rest of the call can bail cleanly
     try:
         yield run
     finally:
@@ -183,11 +178,16 @@ def comparison_run(
             pass
 
 
-def log_comparison_table(run, columns, rows, name="variants_summary"):
+def log_comparison_table(
+    run,
+    columns: list[str],
+    rows: Iterable[Iterable[Any]],
+    name: str = "variants_summary",
+) -> None:
     # Shared `log_comparison_table` logic reused by multiple benchmark paths.
     if run is None:
         return
-    # isolate errors so the rest of the call can bail cleanly
+    # chart helpers can fail on minimal CI images — skip instead of crashing
     try:
         import wandb
         run.log({name: wandb.Table(columns=columns, data=list(rows))})
@@ -195,11 +195,11 @@ def log_comparison_table(run, columns, rows, name="variants_summary"):
         pass
 
 
-def log_comparison_image(run, key, path):
+def log_comparison_image(run, key: str, path: str) -> None:
     # CLI/helper entry for `log_comparison_image`.
     if run is None:
         return
-    # chart helpers can fail on minimal CI images — skip instead of crashing
+    # wandb is optional in student environments — ignore import failures
     try:
         import wandb
         run.log({key: wandb.Image(path)})
@@ -207,14 +207,15 @@ def log_comparison_image(run, key, path):
         pass
 
 
+# Artifact logging for quantized checkpoints
 def log_checkpoint_artifact(
-    name,
-    out_dir,
-    metadata=None,
-    project=None,
-    description="",
-    include_weights=False,
-):
+    name: str,
+    out_dir: str,
+    metadata: Optional[dict[str, Any]] = None,
+    project: Optional[str] = None,
+    description: str = "",
+    include_weights: bool = False,
+) -> Optional[str]:
     wb = _try_import_wandb()
 
     # wandb client missing — skip logging side-effects quietly
@@ -250,15 +251,16 @@ def log_checkpoint_artifact(
         metadata=metadata or {},
     )
 
-    # always log the small metadata files
+    # Always log small metadata files.
     for fname in ("config.json", "generation_config.json", "tokenizer_config.json",
                   "preprocessor_config.json", "processor_config.json"):
         fp = p / fname
         if fp.exists():
             art.add_file(str(fp), name=fname)
 
-    # tiny size-manifest JSON
+    # File-size manifest as a tiny JSON in the artifact.
     sizes = {}
+    # process records in deterministic order
     for child in p.glob("*"):
         if child.is_file():
             sizes[child.name] = child.stat().st_size
@@ -273,7 +275,6 @@ def log_checkpoint_artifact(
 
     # upload heavyweight checkpoint blobs only when enabled
     if include_weights:
-        # this uploads safetensors (many GB). uses W&B storage quota
         art.add_dir(str(p))
 
     run.log_artifact(art)
@@ -286,6 +287,7 @@ def log_checkpoint_artifact(
 
     # attach teammate tags/extra descriptors when wandb accepts them
     if metadata:
+        # process records in deterministic order
         for k, v in metadata.items():
             if isinstance(v, (int, float)):
                 run.summary[f"checkpoint/{k}"] = v
