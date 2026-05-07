@@ -31,7 +31,7 @@ def _ensure_transformers_save_pretrained_patch() -> None:
     save_pretrained(save_compressed=True).
     """
     site_paths = [sysconfig.get_paths().get(k) for k in ("purelib", "platlib")]
-    # step through the batch one entry at a time
+    # Search both purelib + platlib — editable installs land in different roots.
     for base in filter(None, site_paths):
         path = Path(base) / "transformers" / "modeling_utils.py"
         if path.exists():
@@ -41,10 +41,12 @@ def _ensure_transformers_save_pretrained_patch() -> None:
 
     text = path.read_text()
 
+    # Idempotent toggle — skip patching if someone already rewrote this guard.
     if "if module_map and False:" in text:
         print(f"==> transformers save_pretrained patch already present: {path}")
         return
 
+    # Fail loud if transformers layout diverged drastically from what we patched before.
     if "if module_map:" not in text:
         raise RuntimeError(
             "transformers modeling_utils.py does not contain the expected "
