@@ -7,7 +7,7 @@
     "characteristic_form": "The expected response should identify the motor as degraded or critical. It should describe a significant hotspot or localized high-temperature region consistent with a stuck rotor fault. The response should NOT rate the motor as healthy or normal.",
     "deterministic": false,
     "text": "Rate the overall condition of this induction motor as healthy, degraded, or critical based on the thermal image. Justify your rating.",
-    "image_path": "scenarios/motors/Rotor-0/r030.bmp",
+    "image_path": "data/motors/r030.bmp",
     "expected_tool": "vision.analyze_image",
     "tool_args_extra": {
       "question": "Rate the overall condition of this induction motor as healthy, degraded, or critical based on the thermal image. Justify your rating."
@@ -34,7 +34,7 @@
     "characteristic_form": "The expected response should identify a fault condition. It should describe a visible thermal anomaly such as a hotspot, non-uniform heat distribution, or localized high-temperature region consistent with a cooling fan fault. The response should NOT describe the motor as operating normally or free of faults.",
     "deterministic": false,
     "text": "Is this induction motor operating normally or does it show signs of a fault? Describe any thermal anomalies you observe.",
-    "image_path": "scenarios/motors/Fan/f068.bmp",
+    "image_path": "data/motors/f068.bmp",
     "expected_tool": "vision.analyze_image",
     "tool_args_extra": {
       "question": "Is this induction motor operating normally or does it show signs of a fault? Describe any thermal anomalies you observe."
@@ -61,7 +61,7 @@
     "characteristic_form": "The expected response should describe a uniform or even temperature distribution with no significant hotspots. It should indicate that heat is distributed evenly across the motor surface. The response should NOT describe any hotspot, localized high-temperature region, or non-uniform distribution.",
     "deterministic": false,
     "text": "What is the temperature distribution pattern across this motor in the thermal image? Is it uniform or are there hotspots?",
-    "image_path": "scenarios/motors/Noload/002.bmp",
+    "image_path": "data/motors/002.bmp",
     "expected_tool": "vision.analyze_image",
     "tool_args_extra": {
       "question": "What is the temperature distribution pattern across this motor in the thermal image? Is it uniform or are there hotspots?"
@@ -88,7 +88,7 @@
     "characteristic_form": "The expected response should describe a non-uniform temperature distribution with a visible hotspot. It should identify the hotspot as localized rather than spread evenly across the motor, consistent with a stuck rotor fault. The response should NOT describe the distribution as uniform.",
     "deterministic": false,
     "text": "What is the temperature distribution pattern across this motor in the thermal image? Is it uniform or are there hotspots?",
-    "image_path": "scenarios/motors/Rotor-0/r030.bmp",
+    "image_path": "data/motors/r030.bmp",
     "expected_tool": "vision.analyze_image",
     "tool_args_extra": {
       "question": "What is the temperature distribution pattern across this motor in the thermal image? Is it uniform or are there hotspots?"
@@ -114,7 +114,7 @@
     "characteristic_form": "The expected response should identify the cooling fan as the most likely source of the fault. It should explain that the localized hotspot near the fan area is consistent with a cooling fan failure. The response should NOT identify the stator windings or rotor as the primary fault source for this image. Note: model has shown tendency to attribute faults to stator windings \u2014 this is the key trap case.",
     "deterministic": false,
     "text": "If there is a fault in this motor, which component is most likely the source \u2014 stator windings, rotor, or cooling fan? Explain your reasoning.",
-    "image_path": "scenarios/motors/Fan/f068.bmp",
+    "image_path": "data/motors/f068.bmp",
     "expected_tool": "vision.analyze_image",
     "tool_args_extra": {
       "question": "If there is a fault in this motor, which component is most likely the source \u2014 stator windings, rotor, or cooling fan? Explain your reasoning."
@@ -140,7 +140,7 @@
     "characteristic_form": "The expected response should recommend shutting down the motor immediately or scheduling urgent maintenance. It should justify this based on the severity of the thermal anomaly visible, consistent with a three-phase stator short circuit. The response should NOT recommend continuing to operate with no action.",
     "deterministic": false,
     "text": "Based on this thermal image, should this motor be shut down immediately, scheduled for maintenance, or continue operating? Justify your decision.",
-    "image_path": "scenarios/motors/A&C&B10/099.bmp",
+    "image_path": "data/motors/099.bmp",
     "expected_tool": "vision.analyze_image",
     "tool_args_extra": {
       "question": "Based on this thermal image, should this motor be shut down immediately, scheduled for maintenance, or continue operating? Justify your decision."
