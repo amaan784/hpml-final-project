@@ -1,5 +1,4 @@
-# Qwen2.5-VL W4A16 via llmcompressor 0.10 -> compressed-tensors dump for vLLM 0.19+.
-# Modes: w4a16_domain (domain text), w4a16_generic (ultrachat).
+# Qwen2.5-VL W4A16 quant (llmcompressor 0.10). Same idea as the Llama quant script.
 
 import argparse
 import os
@@ -7,15 +6,11 @@ import sys
 import sysconfig
 from pathlib import Path
 
-# Disable wandb noise inside oneshot (llmcompressor pulls wandb at import).
+# wandb off inside oneshot
 os.environ.setdefault("WANDB_DISABLED", "true")
 os.environ.setdefault("WANDB_MODE", "disabled")
 
-# Reduce CUDA fragmentation. Qwen2.5-VL's MLP intermediate (18944) generates a
-# 1.43 GB Hessian for the down_proj Linear. On a 22 GiB L4 alongside the
-# 15 GB FP16 model, fragmentation triggers OOM during ``H[perm][:, perm]``
-# permutation. Expandable segments let the allocator grow into freed blocks
-# instead of requiring contiguous regions.
+# L4: avoid allocator fragmentation during big Hessian steps
 os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
 
 _REPO = Path(__file__).resolve().parent.parent
@@ -23,15 +18,9 @@ sys.path.insert(0, str(_REPO))
 
 
 def _ensure_transformers_save_pretrained_patch() -> None:
-    """Patch transformers 4.57's offloaded-save module_map bug before import.
-
-    This must run before importing transformers.modeling_utils. The loaded
-    save_pretrained bytecode otherwise keeps the buggy `if module_map:` branch,
-    which crashes on parameter-only Qwen/LLaVA vision attributes during
-    save_pretrained(save_compressed=True).
-    """
+    # `ensure_transformers_save_pretrained_patch` lives here. was getting too cramped inline.
     site_paths = [sysconfig.get_paths().get(k) for k in ("purelib", "platlib")]
-    # Search both purelib + platlib — editable installs land in different roots.
+    # step through the batch one entry at a time
     for base in filter(None, site_paths):
         path = Path(base) / "transformers" / "modeling_utils.py"
         if path.exists():
@@ -40,24 +29,24 @@ def _ensure_transformers_save_pretrained_patch() -> None:
         raise RuntimeError("could not find transformers/modeling_utils.py to patch")
 
     text = path.read_text()
+    remaining = text.count("if module_map:")
+    already_patched = text.count("if module_map and False:")
 
-    # Idempotent toggle — skip patching if someone already rewrote this guard.
-    if "if module_map and False:" in text:
-        print(f"==> transformers save_pretrained patch already present: {path}")
+    if remaining == 0 and already_patched > 0:
+        print(f"==> transformers save_pretrained patch already present ({already_patched}x): {path}")
         return
 
-    # Fail loud if transformers layout diverged drastically from what we patched before.
-    if "if module_map:" not in text:
+    if remaining == 0:
         raise RuntimeError(
             "transformers modeling_utils.py does not contain the expected "
             "`if module_map:` guard; inspect save_pretrained before quantizing."
         )
-    path.write_text(text.replace("if module_map:", "if module_map and False:", 1))
-    print(f"==> patched transformers save_pretrained module_map guard: {path}")
+    # 4.57+ can have multiple module_map branches. neutralize all of them
+    path.write_text(text.replace("if module_map:", "if module_map and False:"))
+    print(f"==> patched transformers save_pretrained module_map guard ({remaining}x): {path}")
 
 
 def _build_dataset(mode: str, num_samples: int):
-    """Return a ``datasets.Dataset`` with a single ``text`` column."""
     from datasets import Dataset
     from benchmark.calibration import build_domain_corpus, build_generic_corpus
 
@@ -103,7 +92,7 @@ def _patch_qwen_vl_for_fx_tracing() -> None:
 
     Idempotent: safe to call multiple times.
     """
-    # wrap risky IO or RPC so we can surface a useful failure
+    # isolate errors so the rest of the call can bail cleanly
     try:
         import torch.fx._symbolic_trace as _fxst
         from transformers.models.qwen2_5_vl import modeling_qwen2_5_vl as _mod
@@ -219,7 +208,6 @@ def _resolve_decoder_layer_class_name() -> str:
     """
     from transformers.models.qwen2_5_vl import modeling_qwen2_5_vl as _mod
 
-    # repeat for every element we need to touch
     for candidate in (
         "Qwen2_5_VLDecoderLayer",
         "Qwen2_5_VLTextDecoderLayer",
@@ -422,7 +410,7 @@ def main() -> int:
     # Re-enable wandb just for this step (was disabled at script start).
     os.environ["WANDB_DISABLED"] = "false"
     os.environ["WANDB_MODE"] = "online"
-    # keep the happy path obvious by catching failures here
+    # wrap risky IO or RPC so we can surface a useful failure
     try:
         sys.path.insert(0, str(_REPO))
         from benchmark.wandb_logger import log_checkpoint_artifact

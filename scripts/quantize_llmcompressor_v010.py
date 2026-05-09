@@ -19,10 +19,11 @@ ap.add_argument("--num-samples", type=int, default=128)
 ap.add_argument("--max-seq-len", type=int, default=2048)
 args = ap.parse_args()
 
-def _ensure_transformers_save_pretrained_patch():
-    # transformers 4.57 module_map bug on offload save - flip guard once
+
+def _ensure_transformers_save_pretrained_patch() -> None:
+    # `ensure_transformers_save_pretrained_patch` lives here. was getting too cramped inline.
     site_paths = [sysconfig.get_paths().get(k) for k in ("purelib", "platlib")]
-    # step through the batch one entry at a time
+    # each pass handles the next item in the sequence
     for base in filter(None, site_paths):
         path = Path(base) / "transformers" / "modeling_utils.py"
         if path.exists():
@@ -31,22 +32,26 @@ def _ensure_transformers_save_pretrained_patch():
         raise RuntimeError("could not find transformers/modeling_utils.py to patch")
 
     text = path.read_text()
+    remaining = text.count("if module_map:")
+    already_patched = text.count("if module_map and False:")
 
-    if "if module_map and False:" in text:
-        print(f"==> transformers save_pretrained patch already present: {path}")
+    if remaining == 0 and already_patched > 0:
+        print(f"==> transformers save_pretrained patch already present ({already_patched}x): {path}")
         return
 
-    if "if module_map:" not in text:
+    if remaining == 0:
         raise RuntimeError(
             "transformers modeling_utils.py does not contain the expected "
             "`if module_map:` guard; inspect save_pretrained before quantizing."
         )
-    path.write_text(text.replace("if module_map:", "if module_map and False:", 1))
-    print(f"==> patched transformers save_pretrained module_map guard: {path}")
+    # transformers 4.57.6 has TWO `if module_map:` branches. patch ALL of them.
+    path.write_text(text.replace("if module_map:", "if module_map and False:"))
+    print(f"==> patched transformers save_pretrained module_map guard ({remaining}x): {path}")
+
 
 _ensure_transformers_save_pretrained_patch()
 
-# substation calibration text - same set as AutoAWQ
+# Substation domain calibration text - same set we used for AutoAWQ.
 SUBSTATION_BASE = [
     "The image shows a substation transformer with cooling radiators on the side.",
     "Identify the primary piece of substation equipment visible: it appears to be a circuit breaker.",
@@ -96,14 +101,14 @@ from transformers import AutoTokenizer, LlavaNextForConditionalGeneration
 from llmcompressor import oneshot
 from llmcompressor.modifiers.quantization import GPTQModifier
 
-# build calibration dataset
+# Build calibration dataset
 if args.mode == "domain" or args.mode == "w8a8_domain":
     texts = (SUBSTATION_BASE * 4)[:args.num_samples]
     calib_ds = Dataset.from_dict({"text": texts})
     print(f"==> DOMAIN calibration: {len(texts)} substation texts")
 else:
-    # ultrachat_200k is llmcompressor's default text-only calibration set.
-    # pull a slice and flatten messages to text
+    # Generic: HuggingFaceH4/ultrachat_200k is llmcompressor's default text-only
+    # calibration set. Pull a small slice and flatten messages to text.
     raw = load_dataset("HuggingFaceH4/ultrachat_200k", split="train_sft").shuffle(seed=42).select(range(args.num_samples))
 
     def _to_text(ex):
@@ -113,26 +118,28 @@ else:
     calib_ds = raw.map(_to_text, remove_columns=raw.column_names)
     print(f"==> GENERIC calibration: {len(calib_ds)} ultrachat samples")
 
+# Load model
 print(f"==> Loading {args.model_id} ...")
 model = LlavaNextForConditionalGeneration.from_pretrained(
     args.model_id, dtype="auto", device_map="auto"
 )
-# GPTQ calibration only runs forward on the Linear layers. KV cache is dead
-# weight that can push us over the L4's 22 GB ceiling.
+# GPTQ calibration runs only forward passes on the Linear layers. KV cache
+# is dead weight that can push the 8B model + activations + Hessians over
+# the L4's 22 GB ceiling. Mirror the Qwen track's setup.
 model.config.use_cache = False
 
 if hasattr(model.config, "text_config"):
     model.config.text_config.use_cache = False
 
-# W4A16 GPTQ for INT4 modes, SmoothQuant + GPTQ for W8A8.
-# vision tower + multi_modal_projector + lm_head are ignored in both cases:
-# vision encoders collapse at INT4 and INT8 isn't worth the activation-quant
-# cost either (well-documented across LLaVA/Qwen-VL).
+# Recipe: W4A16 GPTQ for INT4 modes, SmoothQuant + GPTQ W8A8 for INT8 mode.
+# Vision tower + multi_modal_projector + lm_head ignored in both cases - vision
+# encoders collapse at INT4 and aren't worth the activation-quant cost at INT8
+# either (well-documented across LLaVA / Qwen-VL families).
 ignore = ["re:.*lm_head", "re:.*vision_tower.*", "re:.*multi_modal_projector.*"]
 
 if args.mode == "w8a8_domain":
-    # SmoothQuant first so activation outliers don't blow up INT8 RTN tail.
-    # GPTQ then handles the weight scale search.
+    # SmoothQuant first so activation outliers don't blow up the INT8
+    # round-to-nearest tail. GPTQ then handles the weight scale search.
     from llmcompressor.modifiers.smoothquant import SmoothQuantModifier
     recipe = [
         SmoothQuantModifier(smoothing_strength=0.7),
@@ -166,12 +173,18 @@ print(f"==> Saving to {args.out_dir} ...")
 os.makedirs(args.out_dir, exist_ok=True)
 
 # Two-step consolidation before save_pretrained:
-#  1. dispatch_model: pull weights off the offload device onto the active one
-#  2. remove_hook_from_module: strip accelerate offload hooks
-# Without (2), save_pretrained's offload-aware branch fires and KeyErrors on
-# nn.Parameter-only attributes (image_newline, class_embedding). (1) alone is
-# insufficient. We MUST go through save_pretrained(save_compressed=True) so
-# llmcompressor's compression hooks fire and pack weights into real INT4.
+#  1. dispatch_model: pull all weights off the offload device onto the active device
+#  2. remove_hook_from_module: strip accelerate's offload hooks
+#
+# Without (2), save_pretrained's `if module_map:` offload-aware branch fires
+# and crashes on nn.Parameter-only attributes (image_newline, class_embedding)
+# with KeyError on module_map lookup. (1) alone is insufficient - confirmed
+# by repeated KeyError: 'image_newline' even after dispatch_model.
+#
+# Saving llmcompressor-compressed weights via save_pretrained(save_compressed=True)
+# is mandatory: llmcompressor's compression hooks fire during this call to pack
+# weights into TRUE INT4 (weight_packed in INT32 storage). Bypassing
+# save_pretrained dumps FP16-dequantized weights instead.
 import torch
 from compressed_tensors.offload import dispatch_model
 from accelerate.hooks import remove_hook_from_module
@@ -182,24 +195,23 @@ print("   remove_hook_from_module: stripping accelerate offload hooks ...")
 remove_hook_from_module(model, recurse=True)
 
 model.save_pretrained(args.out_dir, save_compressed=True)
-print("   save_pretrained completed (compression hooks fired -> packed INT4)")
+print(f"   save_pretrained completed (compression hooks fired -> packed INT4)")
 
-# tokenizer + processor save_pretrained is unaffected by the offload bug
+# Save tokenizer + processor (their save_pretrained is unaffected by the bug).
 AutoTokenizer.from_pretrained(args.model_id).save_pretrained(args.out_dir)
 from transformers import AutoProcessor
 AutoProcessor.from_pretrained(args.model_id, trust_remote_code=True).save_pretrained(args.out_dir)
 
-# verify quantization_config got injected and weights are packed
+# Final verify: confirm quantization_config was injected and weights are packed.
 import json
 cfg_path = os.path.join(args.out_dir, "config.json")
 cfg = json.loads(open(cfg_path).read())
 qc = cfg.get("quantization_config", {})
-# only enter this block when the guard passes
 if qc:
     # vLLM 0.19's LlavaNext loader expects the ignored vision/projector
     # modules to remain in regex form. Some llmcompressor save paths expand
-    # ignore into per-q/k/v keys, which makes vLLM's CLIP loader look for
-    # fused qkv_proj.weight and crash before readiness.
+    # the ignore list into individual q/k/v keys, which makes vLLM's CLIP
+    # loader look for fused qkv_proj.weight and crash before readiness.
     qc["ignore"] = ["lm_head", "re:.*vision_tower.*", "re:.*multi_modal_projector.*"]
     cfg["quantization_config"] = qc
     if isinstance(cfg.get("text_config"), dict) and isinstance(cfg["text_config"].get("quantization_config"), dict):
@@ -209,8 +221,8 @@ if qc:
         f.write("\n")
 print(f"   config.json quantization_config: present={bool(qc)} method={qc.get('quant_method', 'n/a')}")
 
-# log a metadata-only W&B Artifact (config + size manifest only. the
-# 5-9 GB safetensors live under models/ on the VM)
+# Log a metadata-only W&B Artifact (config + size manifest, NOT the
+# 5-9 GB safetensors weights -- those live under models/ on the VM).
 os.environ["WANDB_DISABLED"] = "false"
 os.environ["WANDB_MODE"] = "online"
 # isolate errors so the rest of the call can bail cleanly
@@ -236,7 +248,7 @@ try:
 
     if artifact_url:
         print(f"==> wandb artifact run: {artifact_url}")
-except Exception as exc:
+except Exception as exc:  # noqa: BLE001
     print(f"   (wandb artifact logging skipped: {exc})")
 
 print("==> Done.")
