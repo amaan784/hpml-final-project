@@ -111,17 +111,21 @@ sleep 2
 mkdir -p "$(dirname "$VLLM_LOG")"
 : > "$VLLM_LOG"
 
+# Prepend the venv's bin directory to PATH so subprocesses spawned by vLLM
+# (notably flashinfer JIT calling `ninja`) can find venv-installed binaries.
+VENV_BIN_DIR="$(dirname "$PYTHON_BIN")"
+
 SERVE_CMD=$(printf \
-    'cd %q && %q -m vllm.entrypoints.openai.api_server --model %q --port %q --host 0.0.0.0 --gpu-memory-utilization %q --max-model-len %q --trust-remote-code %s 2>&1 | tee %q' \
-    "$ASSETOPSBENCH_DIR" "$PYTHON_BIN" "$MODEL" "$VLLM_PORT" "$GPU_UTIL" "$MAX_MODEL_LEN" "$EXTRA" "$VLLM_LOG")
+    'cd %q && PATH=%q:$PATH %q -m vllm.entrypoints.openai.api_server --model %q --port %q --host 0.0.0.0 --gpu-memory-utilization %q --max-model-len %q --trust-remote-code %s 2>&1 | tee %q' \
+    "$ASSETOPSBENCH_DIR" "$VENV_BIN_DIR" "$PYTHON_BIN" "$MODEL" "$VLLM_PORT" "$GPU_UTIL" "$MAX_MODEL_LEN" "$EXTRA" "$VLLM_LOG")
 
 echo "==> Starting local vLLM in tmux session 'vllm'"
 echo "    $SERVE_CMD"
 tmux new-session -d -s vllm "$SERVE_CMD"
 
-echo "==> Waiting for vLLM /v1/models on localhost:$VLLM_PORT (up to 8 min)..."
+echo "==> Waiting for vLLM /v1/models on localhost:$VLLM_PORT (up to 15 min)..."
 READY=0
-for i in $(seq 1 96); do
+for i in $(seq 1 180); do
     if curl -sf -m 5 "http://127.0.0.1:$VLLM_PORT/v1/models" >/dev/null 2>&1; then
         echo "    READY (poll $i, ~$((i * 5))s)"
         READY=1
