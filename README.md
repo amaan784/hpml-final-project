@@ -1,824 +1,531 @@
-# amaan_run.md — End-to-End Runbook for the Visual Inspection Agent
+# HPML Final Project: Multi-Modal Agent Inference Optimization for Industrial Asset Operations
 
-Operational guide for HPML Team 23. Covers the **finalized 10-variant sweep**
-(5 Qwen + 5 Llama) on a single GCP L4 VM, with rich W&B integration.
+> **Course:** High Performance Machine Learning
+> **Semester:** Spring 2026
+> **Instructor:** Dr. Kaoutar El Maghraoui
+> **University:** Columbia University
 
-> **Submission deadline: 2026-05-09.**
-> **Estimated VM time: ~3h 25min (~$2.40 @ $0.71/hr).**
->
-> AssetOpsBench upstream's 141 text scenarios use WatsonX as the orchestrator.
-> **We don't need WatsonX.** Both the planner LLM and the vision tool hit the
-> same locally-served vLLM endpoint on the GCP VM. No remote API keys required.
+We extended [AssetOpsBench](https://github.com/IBM/AssetOpsBench) (AAAI 2026) with a multi modal Visual Inspection Agent and applied AWQ W4A16 quantization. On a single NVIDIA L4 GPU, domain calibrated INT4 cuts mean end to end latency by 1.98x on Qwen2.5 VL 7B and 2.47x on Llama 3 LLaVA NeXT 8B, with weight VRAM dropping from 15.5 GiB to 5.9 GiB on the Llama family.
 
 ---
 
-## 0. What to run, in order (the tl;dr)
+## Team Information
 
-```bash
-# ─── On Windows: pre-flight ────────────────────────────────────────────────
-python -m pytest benchmark/tests/ -v               # 17 tests should pass
-python -m benchmark.variants list                  # confirm 10 variants
+**Team Name:** Columbia HPML Team 23, AssetOpsBench Vision
 
-# ─── Bring up VM ──────────────────────────────────────────────────────────
-gcloud compute instances start assetopsbench --zone=us-central1-a
-gcloud compute ssh assetopsbench --tunnel-through-iap `
-    --project=high-perf-ml-487201 --zone=us-central1-a `
-    --ssh-flag="-L 8000:localhost:8000"
+**Members:**
 
-# ─── On VM (after env setup, see §2): quantize × 4 (~2h 20min) ────────────
-tmux new -s quantize
-cd ~/HPML-AssetOpsBench
-mkdir -p ~/HPML-AssetOpsBench/models ~/tmp
-TMPDIR=~/tmp PYTORCH_ALLOC_CONF=expandable_segments:True python scripts/quantize_qwen_v010.py --mode w4a16_domain  --pipeline sequential --max-seq-len 512 --num-samples 64 --out-dir ~/HPML-AssetOpsBench/models/qwen2.5-vl-7b-awq-domain
-TMPDIR=~/tmp PYTORCH_ALLOC_CONF=expandable_segments:True python scripts/quantize_qwen_v010.py --mode w4a16_generic --pipeline sequential --max-seq-len 512 --num-samples 64 --out-dir ~/HPML-AssetOpsBench/models/qwen2.5-vl-7b-awq-generic
-PYTORCH_ALLOC_CONF=expandable_segments:True python scripts/quantize_llmcompressor_v010.py --mode domain  --out-dir ~/HPML-AssetOpsBench/models/llama3-llava-next-8b-awq-domain-real
-PYTORCH_ALLOC_CONF=expandable_segments:True python scripts/quantize_llmcompressor_v010.py --mode generic --out-dir ~/HPML-AssetOpsBench/models/llama3-llava-next-8b-awq-generic-real
+* **Amaan Sheikh** (aas2438). ReAct orchestrator, vision MCP server, benchmark harness, pump impeller scenarios (IDs 201 to 205), WandB instrumentation, LLM as judge methodology, plot pipeline, Qwen L2 serving tuning bundle, Llama L1g (generic AWQ).
+* **Aman Upganlawar** (au2327). Turbine blade scenarios (IDs 301 to 305), dataset registry refactor and four dataset acquisition writeup, vLLM client, ReAct vs Plan Execute agent comparison, Qwen L1g (generic AWQ), Llama L3 image resolution preprocessing, checkpoint verifier, GCP infrastructure jointly with Eric.
+* **Madhav Rajkondawar** (mr4650). Qwen2.5 VL 7B optimization track (L1d AWQ and L3 image preprocessing at 512 px), motor thermal scenarios (IDs 503, 507, 509, 510, 515, 517), variant registry framework with the 17 case test suite, cross variant Weights and Biases summary dashboard, domain vs generic calibration finding, Python environment pinning via the uv lockfile.
+* **Yang Jung (Eric) Chen** (yc4670). Llama 3 LLaVA NeXT 8B optimization track (L1d AWQ and L2 full bundle serving tuning), transformer and substation scenarios (IDs 1, 6, 9, 10, 14, 20), Stage 1 calibration corpus, PyTorch Profiler, vLLM serve scripts and IAP tunneled bench wrapper, GCP infrastructure jointly with Aman, reproduction documentation.
 
-# ─── On VM: bench × 10 (~1h) ──────────────────────────────────────────────
-tmux new -s bench
-bash scripts/serve_and_bench.sh L0_baseline             "Qwen/Qwen2.5-VL-7B-Instruct"
-bash scripts/serve_and_bench.sh L1_awq_w4a16_domain     "$HOME/HPML-AssetOpsBench/models/qwen2.5-vl-7b-awq-domain"  compressed-tensors
-bash scripts/serve_and_bench.sh L1_awq_w4a16_generic    "$HOME/HPML-AssetOpsBench/models/qwen2.5-vl-7b-awq-generic" compressed-tensors
-bash scripts/serve_and_bench.sh L2_full_bundle          "Qwen/Qwen2.5-VL-7B-Instruct"
-bash scripts/serve_and_bench.sh L3_image_512            "Qwen/Qwen2.5-VL-7B-Instruct"
-bash scripts/serve_and_bench.sh L0_llama_baseline           "llava-hf/llama3-llava-next-8b-hf"
-bash scripts/serve_and_bench.sh L1_llama_awq_w4a16_domain   "$HOME/HPML-AssetOpsBench/models/llama3-llava-next-8b-awq-domain-real"  compressed-tensors
-bash scripts/serve_and_bench.sh L1_llama_awq_w4a16_generic  "$HOME/HPML-AssetOpsBench/models/llama3-llava-next-8b-awq-generic-real" compressed-tensors
-bash scripts/serve_and_bench.sh L2_llama_full_bundle        "llava-hf/llama3-llava-next-8b-hf"
-bash scripts/serve_and_bench.sh L3_llama_image_512          "llava-hf/llama3-llava-next-8b-hf"
+## Submission
 
-# ─── Plots + W&B dashboard (~1 min) ───────────────────────────────────────
-uv run python -m benchmark.wandb_summary --name "may7-final"
-# Open the URL printed at the end → headline artifact for the report.
-```
+* **GitHub repository:** [https://github.com/amaan784/hpml-final-project](https://github.com/amaan784/hpml-final-project)
+* **Final report:** [`report/main.tex`](report/main.tex) (PDF compiled at submission time, also under `deliverables/HPML_Final_Report.pdf`)
+* **Final presentation:** [`presentation/HPML Final Presentation Slides.pptx`](presentation/HPML%20Final%20Presentation%20Slides.pptx)
+* **Experiment tracking dashboard:** [https://wandb.ai/amaan784-columbia-university/hpml-final-benchmark](https://wandb.ai/amaan784-columbia-university/hpml-final-benchmark?nw=nwusermr4650)
 
-### Current one-command VM flow
-
-The manual quantize and benchmark commands above are still valid for debugging
-or re-running a single stage. For the final VM run, prefer the overnight wrapper:
-
-```bash
-cd ~/HPML-AssetOpsBench
-unset ASSETOPSBENCH_DIR PYTHON_BIN VLLM_LOG
-export VLLM_PORT=8001
-CLEAN_RESULTS=1 bash scripts/overnight.sh 2>&1 | tee results/overnight.log
-```
-
-`scripts/overnight.sh` now does the full pipeline:
-
-1. Preflight required Python packages in `.venv`.
-2. Build any missing AWQ checkpoints under `models/`.
-3. Clean local CSVs, plots, logs, and TensorBoard traces if `CLEAN_RESULTS=1`.
-4. Run the 10-variant benchmark sweep.
-5. Run LLM-as-judge if `OPENAI_API_KEY` is set.
-6. Generate plots and W&B summary artifacts.
-
-It is resumable at the checkpoint level. If a checkpoint already has
-`config.json`, the quantization stage skips it. If no checkpoints exist, budget
-about **2.5-4 hours** total. Once checkpoints exist, future clean benchmark
-runs should be closer to **40-60 minutes**.
-
-Useful toggles:
-
-```bash
-QUANTIZE_MISSING=0 CLEAN_RESULTS=1 bash scripts/overnight.sh  # skip checkpoint builds
-QUANTIZE_LLAMA=0 CLEAN_RESULTS=1 bash scripts/overnight.sh    # skip missing Llama builds
-```
-
-Before leaving it overnight, verify the Qwen save fix is present:
-
-```bash
-grep -n "output_dir=_tmp\|tempfile" scripts/quantize_qwen_v010.py || echo "OK: no internal oneshot save"
-```
-
-Expected:
-
-```text
-OK: no internal oneshot save
-```
+The final report PDF and the presentation file are checked into the `deliverables/` folder of this repository and uploaded to CourseWorks at submission.
 
 ---
 
-## 1. The 10 active variants
+## 1. Problem Statement
 
-| # | Variant | Family | Model | Optimization | Output dir |
-|---|---|---|---|---|---|
-| 1 | `L0_baseline`                  | L0 | Qwen2.5-VL-7B  | FP16 baseline | (HF cache) |
-| 2 | `L1_awq_w4a16_domain`          | L1 | Qwen2.5-VL-7B  | INT4 W4A16, substation calibration | `~/HPML-AssetOpsBench/models/qwen2.5-vl-7b-awq-domain` |
-| 3 | `L1_awq_w4a16_generic`         | L1 | Qwen2.5-VL-7B  | INT4 W4A16, ultrachat calibration  | `~/HPML-AssetOpsBench/models/qwen2.5-vl-7b-awq-generic` |
-| 4 | `L2_full_bundle`               | L2 | Qwen2.5-VL-7B  | FP16 + prefix cache + chunked prefill + FP8 KV + GPU 90% + max-num-seqs 16 | (HF cache) |
-| 5 | `L3_image_512`                 | L3 | Qwen2.5-VL-7B  | FP16, images downscaled to 512 px | (HF cache) |
-| 6 | `L0_llama_baseline`            | L0 | Llama-3-LLaVA-NeXT-8B | FP16 baseline | (HF cache) |
-| 7 | `L1_llama_awq_w4a16_domain`    | L1 | Llama-3-LLaVA-NeXT-8B | INT4 W4A16, substation calibration | `~/HPML-AssetOpsBench/models/llama3-llava-next-8b-awq-domain-real` |
-| 8 | `L1_llama_awq_w4a16_generic`   | L1 | Llama-3-LLaVA-NeXT-8B | INT4 W4A16, ultrachat calibration  | `~/HPML-AssetOpsBench/models/llama3-llava-next-8b-awq-generic-real` |
-| 9 | `L2_llama_full_bundle`         | L2 | Llama-3-LLaVA-NeXT-8B | Same L2 stack as #4 on Llama | (HF cache) |
-| 10 | `L3_llama_image_512`          | L3 | Llama-3-LLaVA-NeXT-8B | Llama at 512 px | (HF cache) |
+AssetOpsBench (AAAI 2026) covers 141 industrial AI scenarios across text and time series modalities, but it has no vision component. That gap matters in practice because many failure modes (corrosion, ice buildup, bearing damage, casting defects, transformer hot spots) are visible long before sensor data flags them. The natural way to close the gap is to bring a vision language model into the AssetOpsBench agent loop, but doing that on commodity hardware is expensive. At FP16, Llama 3 LLaVA NeXT 8B occupies 15.5 GiB of weight VRAM and produces a 9.3 second per query mean latency on a single NVIDIA L4, which leaves almost no key value cache headroom for batched multi agent workloads.
 
-**Cut variants** (parked in `_unused/variants/`, restorable if needed):
-W8A8 (both families), L2 individual ablations (prefix_cache / chunked_prefill / fp8_kv on both
-families), L3 image_768 / image_1024 / image_1536. See "Why we cut these" below.
+A naive INT4 quantization (using a generic calibration corpus) appears faster on average. On the prior 25 scenario calibration run, generic INT4 also surfaced a runaway generation failure on roughly one of every twenty five scenarios, where the model hits the token cap at around 122 seconds. That kind of tail behavior is unacceptable for industrial deployment.
+
+This project targets inference side optimization. We add a vision modality to AssetOpsBench through a VLM powered MCP agent, then we make it cheap and reliable on a single NVIDIA L4 GPU through quantization, calibration regime selection, vLLM serving tuning, and image preprocessing changes.
+
+**Goal.** Achieve at least a 2x end to end speedup with domain calibrated AWQ INT4 on a single L4, while preserving task accuracy and avoiding the runaway generation failure mode that generic calibration introduced on prior runs.
 
 ---
 
-## 2. VM environment setup (one-time, ~15 min)
+## 2. Model/Application Description
 
-After SSH'ing into the VM with `--ssh-flag="-L 8000:localhost:8000"`:
+**Model architectures.**
 
-```bash
-# Pull latest fork
-cd ~ && rm -rf HPML-AssetOpsBench
-git clone https://github.com/amaan784/AssetOpsBench.git HPML-AssetOpsBench
-cd HPML-AssetOpsBench
+* Primary track: `Qwen/Qwen2.5-VL-7B-Instruct` (7B parameters, native ViT vision tower).
+* Cross family baseline: `llava-hf/llama3-llava-next-8b-hf` (Llama 3 8B with the LLaVA NeXT CLIP based vision tower). We originally targeted Llama 3.2 Vision 11B but its 22 GB FP16 footprint left no headroom on the 24 GB L4, so we substituted the 8B variant instead.
 
-# Base deps (uv-managed)
-uv sync --group vision
+**Framework and serving.** vLLM 0.19.0, llmcompressor 0.10.0.2, compressed-tensors 0.14.0.1, transformers 4.57.6, PyTorch 2.10.0+cu129. Agent orchestration uses the [Model Context Protocol](https://modelcontextprotocol.io/). An in process ReAct agent ([`src/agent/react/`](src/agent/react/)) talks to a custom `vision-mcp-server` ([`src/servers/vision/main.py`](src/servers/vision/main.py)) over MCP stdio. The server exposes `vision.analyze_image`, `vision.assess_condition`, and `vision.detect_visual_defects` tools that conform to the AssetOpsBench agent contract. A Plan Execute runner ([`src/agent/plan_execute/`](src/agent/plan_execute/)) is included so we can compare the two agent architectures.
 
-# GPU stack (matches Eric's pin set)
-uv pip install --python ./.venv/bin/python --torch-backend=cu129 \
-    "vllm==0.19.0" "llmcompressor==0.10.0.2" "compressed-tensors==0.14.0.1" \
-    "transformers==4.57.6" "accelerate>=1.0" "openai>=1.40" "pillow>=10.0" \
-    "matplotlib>=3.8" "wandb>=0.17"
+**Datasets.** Four publicly available industrial image datasets, totaling roughly 10,800 images. Hand authored scenarios live under [`src/scenarios/local/`](src/scenarios/local/).
 
-# Verify
-./.venv/bin/python -c "
-import vllm, transformers, llmcompressor, torch
-print(f'vllm={vllm.__version__}  transformers={transformers.__version__}  llmcompressor={llmcompressor.__version__}')
-print(f'cuda={torch.cuda.is_available()}, device={torch.cuda.get_device_name(0)}')
-"
+| Domain | Dataset | Approximate size | Scenarios file |
+|---|---|---|---|
+| Pump impeller | Kaggle Casting Product (defect detection) | 7,348 images | [`vision_pump_scenarios.json`](src/scenarios/local/vision_pump_scenarios.json) (IDs 201 to 205) |
+| Induction motor (thermal) | Mendeley Thermal Induction Motor (11 fault classes) | 488 thermal images | [`vision_utterance_motor.json`](src/scenarios/local/vision_utterance_motor.json) (IDs 503, 507, 509, 510, 515, 517) |
+| Transformer and substation | HuggingFace 15 class Substation Equipment (YOLO annotated) | 1,660 RGB photos | [`vision_transformer_scenarios.json`](src/scenarios/local/vision_transformer_scenarios.json) (IDs 1, 6, 9, 10, 14, 20) |
+| Wind turbine blade | Blade30 Wind Turbine Blades (defect annotations) | 1,302 drone images | [`vision_turbine_scenarios.json`](src/scenarios/local/vision_turbine_scenarios.json) (IDs 301 to 305) |
 
-# Auth
-huggingface-cli login
-wandb login
+The calibration corpus in [`benchmark/calibration.py`](benchmark/calibration.py) provides 128 hand authored substation inspection text prompts for the domain calibration regime. The generic calibration regime pulls 128 samples at runtime from `HuggingFaceH4/ultrachat_200k`.
 
-# Pre-pull both model weights (~10 min, ~31 GB)
-huggingface-cli download Qwen/Qwen2.5-VL-7B-Instruct
-huggingface-cli download llava-hf/llama3-llava-next-8b-hf
+**Custom layers and modifications.**
 
-# Pin W&B project name
-export WANDB_PROJECT=hpml-assetopsbench-vlm
-echo "export WANDB_PROJECT=hpml-assetopsbench-vlm" >> ~/.bashrc
+* GPTQ W4A16 recipe with `ignore=["re:.*vision_tower.*","re:.*multi_modal_projector.*"]`. The vision tower stays in FP16 because vision encoders quantize poorly at INT4 for the LLaVA family.
+* Custom MCP vision server with five tools and per domain priming. Unified HuggingFace and local image registry in [`src/servers/vision/image_loader.py`](src/servers/vision/image_loader.py).
+* Variant registry framework ([`benchmark/variants/base.py`](benchmark/variants/base.py)). Ten active variants registered (L0, L1d, L1g, L2, L3 for both Qwen and Llama). Driven by the harness in [`benchmark/run_vlm_benchmark.py`](benchmark/run_vlm_benchmark.py).
+* LLM as judge scoring in [`benchmark/llm_judge.py`](benchmark/llm_judge.py) replaces the upstream substring match auto scorer.
 
-# Verify ≥100 GB free disk
-# Keep generated checkpoints in the repo-local models folder and temp files in home
-mkdir -p ~/HPML-AssetOpsBench/models ~/tmp
-export AWQ_DOMAIN="$HOME/HPML-AssetOpsBench/models/qwen2.5-vl-7b-awq-domain"
-export AWQ_GENERIC="$HOME/HPML-AssetOpsBench/models/qwen2.5-vl-7b-awq-generic"
-export AWQ_LLAMA_DOMAIN="$HOME/HPML-AssetOpsBench/models/llama3-llava-next-8b-awq-domain-real"
-export AWQ_LLAMA_GENERIC="$HOME/HPML-AssetOpsBench/models/llama3-llava-next-8b-awq-generic-real"
-cat >> ~/.bashrc <<'EOF'
-export AWQ_DOMAIN="$HOME/HPML-AssetOpsBench/models/qwen2.5-vl-7b-awq-domain"
-export AWQ_GENERIC="$HOME/HPML-AssetOpsBench/models/qwen2.5-vl-7b-awq-generic"
-export AWQ_LLAMA_DOMAIN="$HOME/HPML-AssetOpsBench/models/llama3-llava-next-8b-awq-domain-real"
-export AWQ_LLAMA_GENERIC="$HOME/HPML-AssetOpsBench/models/llama3-llava-next-8b-awq-generic-real"
-EOF
-
-# Verify home filesystem has enough free disk
-df -h /
-df -h ~
-```
+**Hardware target.** GCP `g2-standard-8` with one NVIDIA L4 24 GB, CUDA 12.9, Ubuntu 22.04. Provisioning lives under [`terraform/`](terraform/). Columbia Insomnia is available as a fallback.
 
 ---
 
-## 3. Quantize the 4 INT4 checkpoints (~2h 20min in tmux)
+## 3. Final Results Summary
 
-```bash
-tmux new -s quantize
-cd ~/HPML-AssetOpsBench
-mkdir -p ~/HPML-AssetOpsBench/models ~/tmp
+The headline numbers come from the May 7 sweep, which ran 16 scenarios per variant across 10 variants. The motor thermal scenarios (Madhav, six scenarios) were authored but did not flow through the headline harness. Their results live separately in [`results/madhav/motor_summary.csv`](results/madhav/motor_summary.csv).
 
-# Qwen W4A16 domain on L4 (~25-60 min)
-TMPDIR=~/tmp PYTORCH_ALLOC_CONF=expandable_segments:True python scripts/quantize_qwen_v010.py \
-    --mode w4a16_domain \
-    --pipeline sequential \
-    --max-seq-len 512 \
-    --num-samples 64 \
-    --out-dir ~/HPML-AssetOpsBench/models/qwen2.5-vl-7b-awq-domain
+### 3.1 Qwen2.5 VL 7B, primary track
 
-# Qwen W4A16 generic on L4 (~25-60 min)
-TMPDIR=~/tmp PYTORCH_ALLOC_CONF=expandable_segments:True python scripts/quantize_qwen_v010.py \
-    --mode w4a16_generic \
-    --pipeline sequential \
-    --max-seq-len 512 \
-    --num-samples 64 \
-    --out-dir ~/HPML-AssetOpsBench/models/qwen2.5-vl-7b-awq-generic
+| Metric | Baseline FP16 (L0) | Optimized AWQ W4A16 domain (L1d) | Improvement |
+|---|---:|---:|---|
+| LLM as judge accuracy | 68.8% | **87.5%** | **+18.7 pp** |
+| Mean end to end latency | 9,337 ms | **4,711 ms** | **1.98x faster** |
+| p50 end to end latency | 5,540 ms | 4,293 ms | 1.29x faster |
 
-# Llama W4A16 domain (~35 min)
-PYTORCH_ALLOC_CONF=expandable_segments:True python scripts/quantize_llmcompressor_v010.py --mode domain \
-    --out-dir ~/HPML-AssetOpsBench/models/llama3-llava-next-8b-awq-domain-real
+### 3.2 Llama 3 LLaVA NeXT 8B, cross family baseline
 
-# Llama W4A16 generic (~35 min)
-PYTORCH_ALLOC_CONF=expandable_segments:True python scripts/quantize_llmcompressor_v010.py --mode generic \
-    --out-dir ~/HPML-AssetOpsBench/models/llama3-llava-next-8b-awq-generic-real
+| Metric | Baseline FP16 (L0) | Optimized AWQ W4A16 generic (L1g) | Improvement |
+|---|---:|---:|---|
+| Mean end to end latency | 9,272 ms | **3,270 ms** | **2.84x faster** |
+| p50 end to end latency | 9,132 ms | 3,014 ms | 3.03x faster |
+| LLM as judge accuracy | 62.5% | 57.1% | 5.4 pp lower |
 
-# Detach: Ctrl-b d
-# Reattach: tmux attach -t quantize
-```
+For the Llama track, the L1d (domain) variant gives 2.47x mean speedup at 50% accuracy. From Eric's prior 25 scenario run, the Llama family showed a 2.6x weight VRAM reduction (15.54 GiB to 5.9 GiB) and a 4.7x growth in the key value cache pool (21K to 100K concurrent tokens), confirmed from vLLM's `gpu_model_runner` startup logs.
 
-Both quantize scripts:
-- Use the modern llmcompressor 0.10 API (`from llmcompressor import oneshot`)
-- Set `PYTORCH_ALLOC_CONF=expandable_segments:True` to reduce CUDA fragmentation
-- Save final checkpoints under the repo-local `~/HPML-AssetOpsBench/models`, not `/opt/models`; `/opt` is not writable for the normal VM user.
-- Qwen uses `--pipeline sequential --max-seq-len 512 --num-samples 64` for L4 headroom. The script also patches the Qwen2.5-VL attention path so llmcompressor's FX tracer does not fail on multimodal RoPE.
-- Save weights via `dispatch_model` + `remove_hook_from_module` + `save_pretrained(save_compressed=True)` (the offload-dance fix from Eric's bug catalog)
-- Log a metadata-only W&B Artifact at the end (config.json + size manifest, NOT the 5-9 GB safetensors)
+**Hardware.** One NVIDIA L4 24 GB on GCP `g2-standard-8`, CUDA 12.9, vLLM 0.19, PyTorch, Ubuntu 22.04.
 
-Verify all 4 checkpoints written:
-```bash
-for d in "$HOME/HPML-AssetOpsBench/models/qwen2.5-vl-7b-awq-domain" \
-         "$HOME/HPML-AssetOpsBench/models/qwen2.5-vl-7b-awq-generic" \
-         "$HOME/HPML-AssetOpsBench/models/llama3-llava-next-8b-awq-domain-real" \
-         "$HOME/HPML-AssetOpsBench/models/llama3-llava-next-8b-awq-generic-real"; do
-    test -f "$d/config.json" && echo "OK   $d" || echo "FAIL $d"
-done
-```
-
-If a Qwen quantize OOMs (defaults should prevent it):
-```bash
-TMPDIR=~/tmp PYTORCH_ALLOC_CONF=expandable_segments:True python scripts/quantize_qwen_v010.py \
-    --mode w4a16_domain \
-    --pipeline sequential \
-    --max-seq-len 512 \
-    --num-samples 64 \
-    --out-dir ~/HPML-AssetOpsBench/models/qwen2.5-vl-7b-awq-domain
-```
+**Headline result.** AWQ W4A16 quantization with domain matched calibration on Qwen2.5 VL 7B nearly halves mean end to end inference latency (9.34 s to 4.71 s, 1.98x) while improving LLM as judge accuracy from 68.8% to 87.5% on a single L4 GPU. The Qwen and Llama families respond differently to INT4 quantization: Qwen accuracy improves under domain calibration, while Llama accuracy regresses regardless of calibration regime. We discuss this asymmetry in §6.
 
 ---
 
-## 4. Run the 10 benchmarks (~1h)
-
-`serve_and_bench.sh` per variant: kill old vLLM → start new → wait ready →
-run 30 scenarios → scrape `hpml_metrics` → kill vLLM. Each variant takes
-~5-7 min. Auto-publishes to W&B on completion (URL printed at end).
-
-```bash
-tmux new -s bench
-cd ~/HPML-AssetOpsBench
-
-# ── Qwen track (5 variants) ─────────────────────────────────────────────
-bash scripts/serve_and_bench.sh L0_baseline             "Qwen/Qwen2.5-VL-7B-Instruct"
-bash scripts/serve_and_bench.sh L1_awq_w4a16_domain     "$HOME/HPML-AssetOpsBench/models/qwen2.5-vl-7b-awq-domain"  compressed-tensors
-bash scripts/serve_and_bench.sh L1_awq_w4a16_generic    "$HOME/HPML-AssetOpsBench/models/qwen2.5-vl-7b-awq-generic" compressed-tensors
-bash scripts/serve_and_bench.sh L2_full_bundle          "Qwen/Qwen2.5-VL-7B-Instruct"
-bash scripts/serve_and_bench.sh L3_image_512            "Qwen/Qwen2.5-VL-7B-Instruct"
-
-# ── Llama track (5 variants) ────────────────────────────────────────────
-bash scripts/serve_and_bench.sh L0_llama_baseline           "llava-hf/llama3-llava-next-8b-hf"
-bash scripts/serve_and_bench.sh L1_llama_awq_w4a16_domain   "$HOME/HPML-AssetOpsBench/models/llama3-llava-next-8b-awq-domain-real"  compressed-tensors
-bash scripts/serve_and_bench.sh L1_llama_awq_w4a16_generic  "$HOME/HPML-AssetOpsBench/models/llama3-llava-next-8b-awq-generic-real" compressed-tensors
-bash scripts/serve_and_bench.sh L2_llama_full_bundle        "llava-hf/llama3-llava-next-8b-hf"
-bash scripts/serve_and_bench.sh L3_llama_image_512          "llava-hf/llama3-llava-next-8b-hf"
-```
-
-Each variant produces:
-- Per-scenario rows appended to `results/summary.csv`
-- Per-variant aggregate row appended to `results/hpml_metrics.csv`
-- Bench log at `results/bench_<variant>.log`
-- **Two W&B runs**: one `vlm_benchmark` run (per-scenario table + scalars) and one `hpml_metrics` run (TTFT/ITL/VRAM aggregate)
-
----
-
-## 4a. LLM-as-judge accuracy scoring (~5 min, ~$0.05, REQUIRED for accuracy plots)
-
-**The auto-scorer was retired 2026-05-07** (parked in `_unused/scoring/auto_scorer.py`).
-LLM-as-judge is now the **only** accuracy source. `summary.csv` no longer has
-a `correct` column; `results/llm_judge.csv` carries the per-scenario
-1-5 score + binary pass after you run this step.
-
-GPT-4o-mini reads each `(question, characteristic_form rubric,
-model_response)` triplet and grades 1-5 against the rubric. Reproducible,
-citable methodology (IndustryEQA paper does this), no team-scheduling
-overhead.
-
-**Cost: ~$0.05 for the full sweep.** No team time required. Anywhere with
-network + an OpenAI key works (run on the VM or your laptop).
-
-**This step is required to populate the accuracy-dependent plots
-(`pareto`, `accuracy_per_category`, `calibration_compare`, `family_compare`,
-`accuracy_compare`).** Without it those plots gracefully skip; only the
-latency / VRAM / TTFT plots render.
-
-```bash
-# One-time: get an API key from https://platform.openai.com/api-keys
-export OPENAI_API_KEY=sk-...
-
-# Smoke test on 3 rows first (~$0.001)
-uv run python -m benchmark.llm_judge --limit 3
-# Expected: prints score=N pass=0/1 per row, then per-variant accuracy summary
-
-# Full sweep (~5 min, ~$0.05)
-uv run python -m benchmark.llm_judge
-
-# Output: results/llm_judge.csv (columns: variant, scenario_id, llm_judge_score,
-# llm_judge_pass, llm_judge_reasoning, judge_model, judge_ts, error)
-```
-
-The script is **resumable** — re-running skips rows already in the output CSV
-unless you pass `--force`. Useful if the network drops mid-sweep or if you
-re-run only one variant.
-
-```bash
-# Re-grade just one variant (e.g. after re-running its benchmark)
-uv run python -m benchmark.llm_judge --variant L1_awq_w4a16_domain --force
-
-# Use the more expensive but stronger judge (~$1.20 instead of ~$0.05)
-uv run python -m benchmark.llm_judge --model gpt-4o
-```
-
-After this step, `wandb_summary` automatically picks up `llm_judge.csv` and
-populates the `accuracy` + `mean_score` columns in the `variants_summary`
-Table, plus the per-variant `__llm_score` + `__llm_pass` columns in
-`scenarios_side_by_side`. The 5 accuracy-dependent plots also start
-rendering.
-
----
-
-## 5. Generate the dashboard (~1 min)
-
-After all 10 benchmarks land (and optionally after `llm_judge`):
-
-```bash
-uv run python -m benchmark.wandb_summary --name "may7-final"
-```
-
-This single command does five things:
-
-1. **Regenerates all 8 plots** in `results/plots/` (PDF + 300 DPI PNG, IEEE single-column)
-2. **Builds `variants_summary` Table** — one row per variant (auto-scorer accuracy, LLM-judge accuracy, latency, VRAM, throughput)
-3. **Builds `scenarios_side_by_side` Table** — one row per scenario, columns per variant (auto correct + LLM score + LLM pass + e2e_ms + response). **This is the table teammates use for rubric grading.**
-4. **Uploads everything to W&B** as a single `cross_variant_summary` run with the two Tables + 8 plots pinned
-5. **Writes `results/REPORT_TEMPLATE.md`** with auto-filled headline numbers (Qwen INT4 speedup, Llama INT4 speedup) and section structure for the W&B Report
-
-The W&B URL printed at the end is your headline artifact — link it in the IEEE paper as a footnote.
-
----
-
-## 6. ReAct vs Plan-Execute (NFR comparison, ~20 min, optional)
-
-```bash
-# vLLM should still be serving the L0_baseline from §4. If not, restart:
-tmux new -s vllm
-MODEL=Qwen/Qwen2.5-VL-7B-Instruct bash scripts/serve_vllm.sh   # Ctrl-b d
-
-cd ~/HPML-AssetOpsBench
-
-uv run python -m benchmark.run_agent_benchmark \
-    --agent react \
-    --scenarios src/scenarios/local/vision_pump_scenarios.json \
-    --scenarios src/scenarios/local/vision_transformer_scenarios.json \
-    --scenarios src/scenarios/local/vision_turbine_scenarios.json \
-    --output results/nfr_react.csv
-
-uv run python -m benchmark.run_agent_benchmark \
-    --agent plan_execute \
-    --scenarios src/scenarios/local/vision_pump_scenarios.json \
-    --scenarios src/scenarios/local/vision_transformer_scenarios.json \
-    --scenarios src/scenarios/local/vision_turbine_scenarios.json \
-    --output results/nfr_plan_execute.csv
-
-uv run python -m benchmark.compare_agents \
-    results/nfr_react.csv results/nfr_plan_execute.csv \
-    --output results/comparison_table.md \
-    --plot-dir results/plots/agents
-```
-
----
-
-## 7. Profilers (~15 min, one-time, optional)
-
-```bash
-# PyTorch Profiler — vision tower in isolation
-uv run python benchmark/profile_vision_encoder.py
-# Output: ./tb/  (TensorBoard trace; viewable with `tensorboard --logdir tb`)
-
-# Nsight Systems — single E2E request with NVTX ranges
-sudo apt install -y nvidia-nsight-systems-cli || true
-nsys profile --trace=cuda,nvtx,osrt --output=results/nsys_l0 \
-    uv run python benchmark/profile_single.py \
-    --image hf://transformer/train/0 \
-    --prompt "What equipment is shown in this image?"
-# Output: results/nsys_l0.qdrep — open in Nsight Systems UI on Windows
-```
-
----
-
-## 8. Re-running variants without polluting CSVs
-
-`run_vlm_benchmark.py` and `hpml_metrics.py` open their CSVs in **append
-mode**. Re-running a variant doubles its rows; plots and W&B aggregates
-get contaminated.
-
-Use [scripts/clean_results.py](scripts/clean_results.py):
-
-```bash
-# Dry-run (default — shows what WOULD be deleted)
-python scripts/clean_results.py
-
-# Wipe everything (preserves results/eric/, results/madhav/, etc.)
-python scripts/clean_results.py --yes
-
-# Wipe rows for ONE variant (preserves other variants' rows)
-python scripts/clean_results.py --yes --variants L1_awq_w4a16_domain
-
-# Also clear regenerated outputs
-python scripts/clean_results.py --yes --plots --tensorboard
-```
-
-Typical re-run flow for one variant:
-
-```bash
-python scripts/clean_results.py --yes --variants L1_awq_w4a16_domain
-bash scripts/serve_and_bench.sh L1_awq_w4a16_domain "$HOME/HPML-AssetOpsBench/models/qwen2.5-vl-7b-awq-domain" compressed-tensors
-uv run python -m benchmark.wandb_summary
-```
-
-W&B server runs are NOT touched. Delete from the W&B UI (project page → bulk-delete runs) for a fully clean dashboard.
-
----
-
-## 9. End-of-day cleanup
-
-```bash
-# On VM
-tmux kill-server
-exit
-
-# On Windows
-gcloud compute instances stop assetopsbench --zone=us-central1-a
-
-# Resume later:
-gcloud compute instances start assetopsbench --zone=us-central1-a
-```
-
-**Don't `terraform destroy`** unless you're truly done — that nukes
-the VM disk, including `~/HPML-AssetOpsBench/models/...` quantized checkpoints and installed packages.
-
----
-
-## 10. W&B integration overview
-
-The harness logs **three job types** of W&B runs per variant:
-
-| Job type | Source | What |
-|---|---|---|
-| `vlm_benchmark` | `run_vlm_benchmark.py` → `wandb_logger.log_variant_run()` | One per variant. Per-scenario table + per-step scalars + summary metrics (accuracy, e2e_mean/p50/p95/p99) + vLLM Prometheus deltas + GPU system metrics auto-collected at 2s rate. Tags: `family`, `model_family`, `variant_short`, `variant`. |
-| `hpml_metrics` | `hpml_metrics.py` → `_maybe_log_wandb()` | One per variant. Aggregate row: TTFT p50/p95, ITL p50, throughput, VRAM, KV cache. |
-| `quantize` | `quantize_*.py` → `wandb_logger.log_checkpoint_artifact()` | One per quantization. Logs the checkpoint as a metadata-only W&B Artifact (config.json + size manifest, NOT the 5-9 GB safetensors). |
-| `cross_variant_summary` | `wandb_summary.py` | One per dashboard build. The `variants_summary` Table + `scenarios_side_by_side` Table + 7 plots + Report template. |
-
-To skip W&B for one run: `WANDB_DISABLED=true uv run python ...`
-
-To use a different W&B project: `export WANDB_PROJECT=my-other-project`
-
----
-
-## 11. Repo layout (after cleanup, 2026-05-07)
+## 4. Repository Structure
 
 ```
-HPML-AssetOpsBench-eric/
-├── _unused/                   # Everything cut from the active sweep, preserved
-│   ├── variants/              # 11 cut variants (W8A8, L2 ablations, extra L3)
-│   ├── scripts/               # 11 deprecated quantize + stage scripts
-│   ├── benchmark/             # cods_track1, cods_track2, Dockerfile, requirements.txt
-│   └── repo/                  # aobench, aaaiwebsite, notebook
-├── benchmark/
-│   ├── variants/              # 10 active variants + base.py + __init__/main
-│   ├── tests/test_variants.py # 17 tests
-│   ├── calibration.py         # Substation domain corpus + ultrachat loader
-│   ├── plots.py               # 7 IEEE-quality plots from CSVs
-│   ├── wandb_logger.py        # Centralised W&B helpers (used by harness + summary)
-│   ├── wandb_summary.py       # Cross-variant dashboard + Report template
-│   ├── run_vlm_benchmark.py   # Main harness (per-scenario, calls wandb_logger)
-│   ├── hpml_metrics.py        # Prometheus aggregator (logs to W&B)
-│   ├── nfr_collector.py       # NFR context manager (used by run_agent_benchmark)
-│   ├── compare_agents.py      # ReAct vs Plan-Execute markdown table
-│   ├── concurrent_load.py     # Tail-latency stress test (optional)
-│   ├── profile_single.py      # Nsight Systems wrapper
-│   ├── profile_vision_encoder.py  # PyTorch Profiler (vision tower)
-│   └── run_agent_benchmark.py # ReAct / Plan-Execute NFR runner
+.
+├── README.md
+├── pyproject.toml                         uv and hatch project, pinned deps and entry points
+├── uv.lock
+├── benchmark/                             HPML benchmark harness, variants, evaluation, plots
+│   ├── calibration.py                     128 domain-specific calibration prompts
+│   ├── compare_agents.py
+│   ├── concurrent_load.py                 L2 throughput stress driver
+│   ├── hpml_metrics.py                    vLLM Prometheus and nvidia-smi scrape
+│   ├── llm_judge.py                       LLM-as-judge scoring
+│   ├── nfr_collector.py
+│   ├── plots.py                           eight publication-quality figures
+│   ├── profile_single.py
+│   ├── profile_vision_encoder.py          ViT op-level PyTorch profiler
+│   ├── run_agent_benchmark.py             ReAct vs Plan-Execute comparison driver
+│   ├── run_vlm_benchmark.py               per-variant harness (MCP to vLLM)
+│   ├── wandb_logger.py                    per-variant Weights & Biases run logger
+│   ├── wandb_summary.py                   cross-variant summary tables and plots
+│   ├── tests/                             17-case variant registry test suite
+│   │   └── test_variants.py
+│   └── variants/                          ten variant configs, L0 through L3 for both families
+│       ├── base.py
+│       ├── L0_baseline.py
+│       ├── L0_llama_baseline.py
+│       ├── L1_awq_w4a16_domain.py
+│       ├── L1_awq_w4a16_generic.py
+│       ├── L1_llama_awq_w4a16_domain.py
+│       ├── L1_llama_awq_w4a16_generic.py
+│       ├── L2_full_bundle.py
+│       ├── L2_llama_full_bundle.py
+│       ├── L3_image_512.py
+│       └── L3_llama_image_512.py
 ├── scripts/
-│   ├── quantize_qwen_v010.py            # Qwen W4A16 (modern llmcompressor 0.10 API)
-│   ├── quantize_llmcompressor_v010.py   # Llama W4A16 (Eric's, supports w8a8_domain too)
-│   ├── clean_results.py                 # CSV row scrubber + dry-run mode
-│   ├── verify_checkpoint.py             # Post-quantize format check
-│   ├── serve_vllm.sh                    # vLLM launcher
-│   ├── serve_and_bench.sh               # Per-variant: serve + bench + metrics + kill
-│   ├── run_full_bench.sh                # Full sweep wrapper (Eric's, Llama-only)
-│   └── iap_tunnel.sh                    # GCP IAP SSH tunnel
-├── data/
-│   ├── pumps/{defective,fine}/*.jpeg    # 5 images (Amaan)
-│   ├── transformer/*.jpg                # 20 images (Eric)
-│   └── turbine/{defective,normal}/*.jpg # 10 images (Eric)
+│   ├── clean_results.py
+│   ├── iap_tunnel.sh
+│   ├── overnight.sh                       full pipeline (preflight, quant, sweep, judge, summary)
+│   ├── quantize_llmcompressor_v010.py     Llama GPTQ W4A16
+│   ├── quantize_qwen_v010.py              Qwen GPTQ W4A16 with FX patches
+│   ├── run_full_bench.sh                  ten-variant sweep, fault-tolerant
+│   ├── serve_and_bench.sh                 per-variant serve and bench
+│   ├── serve_vllm.sh                      vLLM startup wrapper
+│   ├── setup_vm.sh                        GCP L4 VM provisioning helper
+│   └── verify_checkpoint.py
 ├── src/
-│   ├── agent/                # ReAct + Plan-Execute orchestrators (our re-impl)
-│   ├── llm/                  # LLMBackend abstractions (LiteLLM, vLLM)
-│   ├── servers/vision/       # 5-tool vision MCP server
-│   ├── servers/{iot,fmsr,...}/  # Upstream MCP servers (kept for PR; unused by us)
-│   ├── scenarios/local/      # vision_{pump,transformer,turbine}_scenarios.json
-│   └── tmp/agent_hive/       # Upstream AgentHive (kept as reference, unused)
-├── results/
-│   ├── eric/                 # Eric's Apr 24 Llama runs (preserved, immutable)
-│   ├── summary.csv           # Per-scenario rows, all variants (will populate after sweep)
-│   ├── hpml_metrics.csv      # Per-variant aggregates
-│   ├── plots/                # 7 PNGs + 7 PDFs (regenerated by plots.py)
-│   └── REPORT_TEMPLATE.md    # Auto-generated W&B Report skeleton (after wandb_summary)
-├── terraform/                # GCP L4 VM provisioning
-├── report/                   # main.tex + references.bib (paper draft)
-├── presentation/OUTLINE.md   # Slides outline
-├── proposal_edits.md         # What proposal said vs what we did (drives report)
-├── benchmark_explained.md    # Eval methodology framing (auto-scorer + rubric)
-└── amaan_run.md              # ← this file
+│   ├── agent/
+│   │   ├── plan_execute/                  Plan-Execute runner
+│   │   └── react/                         ReAct runner
+│   ├── llm/                               litellm and vLLM client abstractions
+│   ├── scenarios/local/                   hand-authored vision scenarios across four domains
+│   │   ├── vision_pump_scenarios.json
+│   │   ├── vision_transformer_scenarios.json
+│   │   ├── vision_turbine_scenarios.json
+│   │   └── vision_utterance_motor.json
+│   └── servers/vision/                    custom MCP vision server (HPML)
+│       ├── image_loader.py
+│       ├── main.py
+│       └── vlm_client.py
+├── terraform/                             GCP L4 VM infrastructure as code
+│   ├── compute.tf
+│   ├── main.tf
+│   ├── network.tf
+│   ├── outputs.tf
+│   ├── secrets.tf
+│   ├── startup.sh
+│   ├── storage.tf
+│   ├── terraform.tfvars.example
+│   └── variables.tf
+├── results/                               logs, CSVs, and figures from benchmark runs
+│   └── plots/                             eight publication-quality figures
+└── deliverables/                          final PDF and report — same files uploaded to CourseWorks
+    ├── HPML_Final_Report.pdf
+    └── HPML_Final_Presentation.pdf
 ```
 
----
-
-## 12. Why we cut variants (for the report)
-
-- **W8A8 (both families)** — INT8 vs INT4 difference is below auto-scorer noise on N=30. Highest OOM risk at quantize time. **Cost > benefit.** Scoped to future work.
-- **L2 individual ablations (prefix_cache / chunked_prefill / fp8_kv on both)** — All three are concurrency-targeted; on N=30 sequential single-batch traffic, they show ~no measurable difference from L0. Keep `L2_full_bundle` as the production-stack Pareto point.
-- **L3 image_768 / image_1024 / image_1536** — `L3_image_1024` is functionally identical to L0_baseline (same FP16, same default resolution). Keeping just `L3_image_512` gives the directional answer (half-resolution → faster + accuracy tradeoff). 768/1536 add Pareto curvature but eat VM budget.
-
-All cut variants live in `_unused/variants/` — restore by `mv` back to `benchmark/variants/`.
+> **Note:** Quantized checkpoints are not committed; they are regenerated on the VM via `scripts/quantize_*.py`.
 
 ---
 
-## 13. Time + cost summary
+## 5. Reproducibility Instructions
 
-| Phase | L4 time | Other cost |
-|---|---:|---:|
-| VM bring-up + env setup (one-time) | ~15 min | — |
-| Quantize × 4 (Qwen w4a16-d/g + Llama w4a16-d/g) | ~2h 20min | — |
-| Bench × 10 (5 Qwen + 5 Llama) | ~1h 00min | — |
-| LLM-judge accuracy scoring (optional) | ~5 min (network, not GPU) | ~$0.05 OpenAI |
-| Plots + W&B summary | ~5 min | — |
-| **L4 GPU total** | **~3h 25min** | |
-| **L4 GPU cost @ $0.71/hr** | **~$2.40** | |
+### A. Environment Setup
 
-If a quantize OOMs and you need to debug: budget +30 min slack.
+**Provision the GCP L4 VM** (use [`scripts/setup_vm.sh`](scripts/setup_vm.sh) for the gcloud-only path or [`terraform/`](terraform/) for the full IaC path):
 
----
-
-## 14. Common errors and fixes
-
-### `ModuleNotFoundError: No module named 'benchmark'`
-
-Cause: `python benchmark/script.py` doesn't put repo root on `sys.path`.
-Fix: use `python -m benchmark.script` (no `.py`, dotted path).
-
-### Qwen W4A16 quantize OOMs with 1.43 GiB Hessian error
-
-Use the lower-memory L4 command. `--pipeline sequential` reduces calibration state, and `512/64` cuts activation/Hessian pressure:
 ```bash
-TMPDIR=~/tmp PYTORCH_ALLOC_CONF=expandable_segments:True python scripts/quantize_qwen_v010.py \
-  --mode w4a16_domain \
-  --pipeline sequential \
-  --max-seq-len 512 \
-  --num-samples 64 \
-  --out-dir ~/HPML-AssetOpsBench/models/qwen2.5-vl-7b-awq-domain
+bash scripts/setup_vm.sh                  # creates g2-standard-8 + 1x L4, IAP firewall, Cloud NAT
+bash scripts/setup_vm.sh ssh              # SSH via IAP tunnel
 ```
 
-### Qwen W4A16 quantize fails with `Proxy object cannot be iterated` in `apply_multimodal_rotary_pos_emb`
+The VM uses Deep Learning VM image `common-cu129-ubuntu-2204-nvidia-580` (CUDA 12.9 preinstalled) and `--no-address` (Columbia org-policy compatible). Cloud NAT in `us-west4` (or whichever region the VM lands in) is required for outbound HuggingFace / pip pulls.
 
-This usually means the VM is running an old `scripts/quantize_qwen_v010.py`. Pull latest on `main`, then confirm the CLI has `--pipeline`:
+**System packages on the VM.** The DLVM image ships with `gcc-12` (`/usr/bin/gcc → /usr/bin/gcc-12`) but not the matching `g++-12` / `cc1plus`, which vLLM's flashinfer JIT needs to compile CUDA C++ kernels for the L2 prefix-caching variants. nvcc shells out to `gcc` for `.cu` files, and `gcc` looks for `cc1plus` under its own version-matched path (`/usr/lib/gcc/x86_64-linux-gnu/12/cc1plus`); without the matching `g++-12` package installed, that path is missing and the build fails with `gcc: fatal error: cannot execute 'cc1plus'`. Install `g++-12` and register both `gcc` and `g++` as version-12 alternatives so they stay in sync:
 
 ```bash
+sudo apt-get update
+sudo apt-get install -y g++-12
+
+# Register gcc, g++, AND c++ at version 12 as alternatives. The DLVM image
+# wires /usr/bin/gcc as a plain symlink (not via update-alternatives), so the
+# `--install` step is required before `--set` will accept them. flashinfer's
+# JIT also link-step shells out to the unversioned `c++` (a separate Debian
+# alternative from `g++`), so it must be registered too — otherwise the build
+# fails at the final shared-library link with `/bin/sh: 1: c++: not found`.
+# Priority 120 overrides any prior mis-registration of gcc-11.
+sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 120
+sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-12 120
+sudo update-alternatives --install /usr/bin/c++ c++ /usr/bin/g++-12 120
+sudo update-alternatives --set gcc /usr/bin/gcc-12
+sudo update-alternatives --set g++ /usr/bin/g++-12
+sudo update-alternatives --set c++ /usr/bin/g++-12
+
+# Sanity checks
+gcc --version    # 12.3.0
+g++ --version    # 12.3.0 (must match gcc major version)
+c++ --version    # 12.3.0 (linker uses this)
+ls /usr/lib/gcc/x86_64-linux-gnu/12/cc1plus    # must exist
+```
+
+If a future DLVM image ships with a different default `gcc` major version, install the matching `g++-N` and substitute `12` → `N` in the commands above. The rule is: `g++` major version must equal `gcc` major version, and the `cc1plus` binary at `/usr/lib/gcc/x86_64-linux-gnu/<N>/cc1plus` must exist.
+
+**On the VM, set up the repo and dependencies:**
+
+```bash
+git clone https://github.com/amaan784/hpml-final-project HPML-AssetOpsBench
 cd ~/HPML-AssetOpsBench
-git checkout main
-git pull --ff-only
-python scripts/quantize_qwen_v010.py --help | grep pipeline
-python -c "import llmcompressor, vllm, transformers; print(llmcompressor.__version__, vllm.__version__, transformers.__version__)"
-```
 
-Expected versions: `0.10.0.2 0.19.0 4.57.6`. Then rerun the L4-safe sequential command from the OOM section.
+# uv (already on the DLVM image; install if missing: `curl -LsSf https://astral.sh/uv/install.sh | sh`)
+# Base deps from the locked dependency graph:
+uv sync --locked --group vision --group dev
 
-### `PermissionError: [Errno 13] Permission denied: '/opt/models/...'`
-
-The normal VM user cannot write to `/opt/models`. Save checkpoints in the repo-local models folder:
-
-```bash
-mkdir -p ~/HPML-AssetOpsBench/models ~/tmp
-TMPDIR=~/tmp PYTORCH_ALLOC_CONF=expandable_segments:True python scripts/quantize_qwen_v010.py \
-  --mode w4a16_domain \
-  --pipeline sequential \
-  --max-seq-len 512 \
-  --num-samples 64 \
-  --out-dir ~/HPML-AssetOpsBench/models/qwen2.5-vl-7b-awq-domain
-```
-
-### Qwen quantize save fails with `visual.patch_embed.proj.weight`
-
-This happens after quantization completes, during checkpoint save. It means
-Transformers 4.57's offloaded-save branch is still active and crashes on a
-parameter-only vision attribute. Current scripts patch
-`transformers/modeling_utils.py` before importing Transformers, replacing
-`if module_map:` with `if module_map and False:`. Qwen also clears stale
-`hf_device_map` after `dispatch_model` + `remove_hook_from_module`, then calls
-`save_pretrained(save_compressed=True)`.
-
-Verify the fix:
-
-```bash
-grep -n "if module_map and False" .venv/lib/python3.12/site-packages/transformers/modeling_utils.py
-grep -n "hf_device_map" scripts/quantize_qwen_v010.py
-grep -n "output_dir=_tmp\|tempfile" scripts/quantize_qwen_v010.py || echo "OK: no internal oneshot save"
-```
-
-Expected:
-
-```text
-... if module_map and False ...
-... hf_device_map ...
-OK: no internal oneshot save
-```
-
-### `ModuleNotFoundError: No module named 'vllm'` or `qwen_vl_utils`
-
-Install packages with `uv pip`, not plain `pip`, because this VM venv may not
-include `pip`:
-
-```bash
-cd ~/HPML-AssetOpsBench
-uv pip install --python .venv/bin/python \
+# Heavy GPU stack (intentionally outside the main lock):
+uv pip install --python .venv/bin/python --torch-backend=cu129 \
   "vllm==0.19.0" \
   "llmcompressor==0.10.0.2" \
   "compressed-tensors==0.14.0.1" \
-  qwen-vl-utils
+  "transformers==4.57.6" \
+  "accelerate>=1.0" \
+  "qwen-vl-utils>=0.0.10" \
+  "safetensors>=0.4" \
+  "wandb>=0.17" \
+  "openai>=1.40" \
+  "matplotlib>=3.8" \
+  "pillow>=10.0" \
+  "ninja"   # required (with g++ above) for vLLM's flashinfer JIT in the L2 variants
 ```
 
-### `ModuleNotFoundError: No module named 'matplotlib'`
+`uv sync --locked` alone will not install the CUDA / vLLM stack — both steps are required.
 
-The benchmark and LLM judge already finished; only Stage 4 plots/W&B summary
-failed. Install plotting support, then rerun just the summary step:
+**Authentication:**
+
+```bash
+wandb login                               # paste API key from https://wandb.ai/authorize
+export OPENAI_API_KEY=sk-...              # required for the LLM-as-judge step
+```
+
+**System requirements.** Python 3.12+, CUDA 12.9, ≥ 24 GB GPU memory (L4 / A10G / 4090 class). The local development side only needs Python and the harness because model serving runs on the VM.
+
+### B. Experiment Tracking Dashboard
+
+We log every variant run to Weights and Biases under the `hpml-assetopsbench-vlm` project. Each run records per scenario timing rows, system metrics scraped from the vLLM Prometheus endpoint, and a baseline vs optimized comparison table. The cross variant W&B Report walks through the FP16, quant, serving tuning, and preprocessing sweep on both Qwen and Llama families.
+
+> **🔗 Dashboard:** [https://wandb.ai/amaan784-columbia-university/hpml-final-benchmark](https://wandb.ai/amaan784-columbia-university/hpml-final-benchmark?nw=nwusermr4650)
+>
+> *Platform used:* Weights & Biases
+
+Logging is implemented in [`benchmark/wandb_logger.py`](benchmark/wandb_logger.py). Cross variant summary tables and the figures are produced by [`benchmark/wandb_summary.py`](benchmark/wandb_summary.py) and committed under [`results/plots/`](results/plots/).
+
+### C. Datasets
+
+The scenarios are hand authored and committed under [`src/scenarios/local/`](src/scenarios/local/). The image assets they reference are not all committed, only a representative subset that lets the harness smoke test without external downloads. Source, license, and size for each of the four datasets are summarized in §2 above.
+
+The calibration corpus is generated programmatically.
+
+```bash
+# Domain calibration: 128 substation inspection text prompts
+python -c "from benchmark.calibration import SUBSTATION_TEXTS; print(len(SUBSTATION_TEXTS))"
+
+# Generic calibration: 128 samples from HuggingFaceH4/ultrachat_200k (downloaded on the fly)
+```
+
+### D. Quantization (replaces "Training")
+
+This project does no training. The optimization is post-training quantization plus serving tuning. **The recommended path is to let [`scripts/overnight.sh`](scripts/overnight.sh) Stage 1 build any missing checkpoints automatically (~25 min × N missing); see §E.** The four checkpoints it produces are `models/qwen2.5-vl-7b-awq-{domain,generic}` and `models/llama3-llava-next-8b-awq-{domain,generic}-real`.
+
+If you prefer to run the quantization step by hand:
+
+```bash
+# Qwen 2.5 VL 7B, primary track (~25 min each on L4)
+python scripts/quantize_qwen_v010.py --mode w4a16_domain  --pipeline sequential --max-seq-len 512 --num-samples 64 --out-dir models/qwen2.5-vl-7b-awq-domain
+python scripts/quantize_qwen_v010.py --mode w4a16_generic --pipeline sequential --max-seq-len 512 --num-samples 64 --out-dir models/qwen2.5-vl-7b-awq-generic
+
+# Llama 3 LLaVA NeXT 8B, cross-family baseline
+python scripts/quantize_llmcompressor_v010.py --mode domain  --out-dir models/llama3-llava-next-8b-awq-domain-real
+python scripts/quantize_llmcompressor_v010.py --mode generic --out-dir models/llama3-llava-next-8b-awq-generic-real
+
+# Verify each checkpoint is in compressed-tensors packed quantized format (not silently saved as fake quant FP16):
+python scripts/verify_checkpoint.py models/qwen2.5-vl-7b-awq-domain
+```
+
+### E. Evaluation
+
+The recommended path is the one-command sweep via [`scripts/overnight.sh`](scripts/overnight.sh). It builds any missing AWQ checkpoints, runs all 10 variants end to end, scrapes vLLM Prometheus + nvidia-smi for HPML metrics, runs LLM-as-judge if `OPENAI_API_KEY` is set, generates plots, and uploads a W&B summary. Total wall clock is roughly 6–8 hours on a single L4.
 
 ```bash
 cd ~/HPML-AssetOpsBench
-uv pip install --python .venv/bin/python "matplotlib>=3.8"
-.venv/bin/python -m benchmark.wandb_summary
+
+# Run inside tmux so a dropped SSH does not kill the sweep
+tmux new -s overnight
+
+# Inside the tmux session
+cd ~/HPML-AssetOpsBench
+CLEAN_RESULTS=1 QUANTIZE_MISSING=1 QUANTIZE_LLAMA=1 \
+  bash scripts/overnight.sh 2>&1 | tee results/overnight.log
+
+# Detach with Ctrl-b d. Reattach later with: tmux attach -t overnight
 ```
 
-### Llama AWQ vLLM fails with `qkv_proj.weight`
+Useful flags:
 
-The Llama AWQ checkpoint saved, but vLLM cannot load it if
-`quantization_config.ignore` was expanded into individual vision-tower keys.
-Repair the existing checkpoint configs in place; no re-quantization needed:
+* `CLEAN_RESULTS=1` — wipe `results/` before the run (recommended for a clean sweep).
+* `QUANTIZE_MISSING=1` — Stage 1 builds any AWQ checkpoint that is not already on disk (~25 min each).
+* `QUANTIZE_LLAMA=1` — also build the Llama AWQ checkpoints (cross-family track).
+* `OPENAI_API_KEY=sk-...` — enables Stage 3 LLM-as-judge scoring; if unset, judge is skipped and only HPML metrics are produced.
+
+If you only want to rerun the benchmark/eval pass (checkpoints already on disk):
 
 ```bash
-python - <<'PY'
-import json
-from pathlib import Path
-
-ignore = ["lm_head", "re:.*vision_tower.*", "re:.*multi_modal_projector.*"]
-for d in [
-    "models/llama3-llava-next-8b-awq-domain-real",
-    "models/llama3-llava-next-8b-awq-generic-real",
-]:
-    p = Path(d) / "config.json"
-    cfg = json.loads(p.read_text())
-    for qc in [cfg.get("quantization_config"), cfg.get("text_config", {}).get("quantization_config")]:
-        if isinstance(qc, dict):
-            qc["ignore"] = ignore
-    p.write_text(json.dumps(cfg, indent=2) + "\n")
-    print(d, "patched")
-PY
+CLEAN_RESULTS=1 QUANTIZE_MISSING=0 bash scripts/overnight.sh 2>&1 | tee results/overnight.log
 ```
 
-### All variants finish in seconds
+Manual fallback — run a single variant at a time:
 
-That means vLLM failed before readiness and the sweep skipped through failures.
-Check the per-variant serve logs:
+```bash
+bash scripts/serve_and_bench.sh L0_baseline           # Qwen FP16
+bash scripts/serve_and_bench.sh L0_llama_baseline     # Llama FP16
+bash scripts/serve_and_bench.sh L1_awq_w4a16_domain
+bash scripts/serve_and_bench.sh L1_awq_w4a16_generic
+bash scripts/serve_and_bench.sh L1_llama_awq_w4a16_domain
+bash scripts/serve_and_bench.sh L1_llama_awq_w4a16_generic
+bash scripts/serve_and_bench.sh L2_full_bundle
+bash scripts/serve_and_bench.sh L2_llama_full_bundle
+bash scripts/serve_and_bench.sh L3_image_512
+bash scripts/serve_and_bench.sh L3_llama_image_512
+
+# LLM-as-judge (separate, optional)
+export OPENAI_API_KEY=sk-...
+python -m benchmark.llm_judge        # writes results/llm_judge.csv
+
+# W&B summary
+python -m benchmark.wandb_summary
+```
+
+Outputs to inspect:
 
 ```bash
 cat results/sweep_status.txt
-grep -n "vLLM tmux session exited\|did NOT become ready\|ERROR\|Traceback" results/overnight.log
-find results -maxdepth 3 -path '*vllm*' -type f -print -exec tail -80 {} \;
+column -ts, results/hpml_metrics.csv
+ls results/plots
 ```
 
-Current scripts write vLLM logs under:
+### F. Profiling
 
-```text
-results/vllm_serve_logs/vllm_<variant>.log
-```
+We instrumented every variant with three complementary tools.
 
-### vLLM log under `/tmp` is stale or owned by another user
-
-Old scripts wrote `/tmp/vllm_<variant>.log`, which can be owned by another VM
-user. Current `serve_and_bench.sh` writes to `results/vllm_serve_logs/`.
-
-Verify:
+* **PyTorch Profiler** (`torch.profiler`) for ViT op level timeline traces. View in `chrome://tracing` or perfetto.dev.
+* **vLLM Prometheus `/metrics` endpoint** for TTFT, ITL, key value cache utilization, and `gpu_cache_usage_pct`. Scraped per variant by [`benchmark/hpml_metrics.py`](benchmark/hpml_metrics.py).
+* **Weights and Biases** for run level tracking of the above plus accuracy and the LLM as judge mean score.
 
 ```bash
-grep -n "vllm_serve_logs" scripts/serve_and_bench.sh
+# vLLM Prometheus and nvidia smi scrape (already wired into serve_and_bench.sh)
+python -m benchmark.hpml_metrics --variant L1_awq_w4a16_domain
+
+# ViT op level profile (PyTorch trace)
+python -m benchmark.profile_vision_encoder --output results/trace_vit.json
+
+# Single request latency breakdown
+python -m benchmark.profile_single --variant L0_baseline
 ```
 
-### `ASSETOPSBENCH_DIR=/opt/assetopsbench`
+### G. Quickstart: Reproduce the Headline Result
 
-Unset stale overrides before running from the VM repo:
+End-to-end on a fresh GCP L4 VM, the whole pipeline (10 variants, both families, LLM-as-judge, plots, W&B summary) is one command inside tmux:
 
 ```bash
-unset ASSETOPSBENCH_DIR PYTHON_BIN VLLM_LOG
-export VLLM_PORT=8001
+# 1. Provision the GCP L4 VM (creates VM + firewall, ~3-5 min for driver install)
+bash scripts/setup_vm.sh
+bash scripts/setup_vm.sh ssh
+
+# 2. On the VM: install env per §A (uv sync + GPU pip install + wandb login + OPENAI_API_KEY)
+#    Then kick off the full sweep inside tmux so SSH drops do not kill the run:
+cd ~/HPML-AssetOpsBench
+tmux new -s overnight
+
+# Inside tmux:
+cd ~/HPML-AssetOpsBench
+export OPENAI_API_KEY=sk-...           # optional, enables LLM-as-judge
+CLEAN_RESULTS=1 QUANTIZE_MISSING=1 QUANTIZE_LLAMA=1 \
+  bash scripts/overnight.sh 2>&1 | tee results/overnight.log
+
+# Detach: Ctrl-b d. Reattach: tmux attach -t overnight
+
+# 3. Inspect results
+cat results/sweep_status.txt
+column -ts, results/hpml_metrics.csv
+ls results/plots
 ```
 
-### Old vLLM still hogging GPU on next run
-
-```bash
-nvidia-smi                                # find PID
-tmux kill-session -t vllm 2>/dev/null     # gentle
-pkill -9 -f "vllm.entrypoints.openai" 2>/dev/null  # hard kill
-```
-
-### `vllm: KeyError: 'qkv_proj.weight'` or `image_newline` on save
-
-Toolchain bug Eric documented. Handled in `quantize_*.py` via the `dispatch_model` + `remove_hook_from_module` dance. If you see it, you're on an old script — pull latest.
-
-### TTFT/ITL plot shows flat 1000ms / 2500ms bars
-
-`hpml_metrics.py` measurement window had no traffic — scraped empty histograms whose default bucket boundaries are 1000 ms / 2500 ms. Re-run `serve_and_bench.sh` (it keeps vLLM busy long enough), or extend `--measurement-window-s` in `hpml_metrics.py`. The plot annotates this case with a red warning box.
-
-### `uv: command not found` (Windows)
-
-```powershell
-powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
-```
-
-### W&B not logging despite `wandb login` success
-
-Check `WANDB_DISABLED` env var:
-```bash
-echo $WANDB_DISABLED   # should be empty
-unset WANDB_DISABLED
-```
+If you only want the Qwen 3-variant headline (FP16, domain INT4, generic INT4) without the cross-family Llama track, run individual variants via `serve_and_bench.sh` as shown in §E.
 
 ---
 
-## 15. Accuracy methodology
+## 6. Results and Observations
 
-We use **LLM-as-judge** (GPT-4o-mini grading against `characteristic_form`
-rubric) as the canonical accuracy source — implemented in
-`benchmark/llm_judge.py`. The substring auto-scorer that used to live in
-`run_vlm_benchmark.py` was retired 2026-05-07 because it was too permissive
-("if response contains 'reject' anywhere, mark correct" → false positives
-when the primary verdict was "accept"). Auto-scorer code preserved at
-`_unused/scoring/auto_scorer.py` for reference; restorable if needed.
+### What worked
 
-The research signal lives across three axes (not just accuracy):
+**Domain calibrated AWQ W4A16 on Qwen is the headline win.** Mean end to end latency drops from 9.34 s to 4.71 s, a 1.98x speedup, and LLM as judge accuracy improves from 68.8% to 87.5%. Qwen is the only family where INT4 quantization actually helps task quality.
 
-1. **Accuracy** — LLM-judge pass rate (score ≥ 4) and mean 1-5 score
-   per variant. ~$0.05 for the full sweep, reproducible, no team
-   grading session needed.
-2. **Latency** (Pareto + calibration_compare plots). The ~2× speedup with
-   AWQ INT4 and the calibration finding (runaway-generation under generic).
-3. **VRAM** (vram_breakdown plot). 2.6× weight reduction → 4.7× more KV
-   cache headroom on the same L4.
+**AWQ W4A16 is reliable as a speedup mechanism on both families.** Qwen domain achieves 1.98x and Llama generic achieves 2.84x mean speedup. The latency win is real even when accuracy does not improve.
 
-For an even stronger accuracy claim, schedule a team grading session
-against the `scenarios_side_by_side` Table that `wandb_summary` publishes
-— it shows N=30 scenarios × 10 variants in one view, with LLM-judge
-score+pass per cell, ideal for sanity-checking the LLM-judge verdicts
-or grading scenarios where the LLM-judge disagrees with itself across
-variants.
+**Real INT4 packing was confirmed end to end.** 16 GB of FP16 weights compress to roughly 6.0 GB on disk in `compressed-tensors` packed quantized format, a 2.7x reduction. Runtime weight VRAM dropped from 15.54 GiB to 5.9 GiB on the Llama family on Eric's prior 25 scenario run, confirmed in vLLM's `gpu_model_runner` startup logs.
 
----
+**Dual purpose VLM serving on a single L4** (planner role and vision tool role on the same model) eliminated the WatsonX API dependency entirely.
 
-## 16. Key file pointers
+**The AssetOpsBench JSON scenario schema extended cleanly to vision.** Adding a Vision scenario type required no upstream code changes.
 
-| What | Where |
-|---|---|
-| Variant registry | `benchmark/variants/` (10 active files + base.py) |
-| Calibration corpus | `benchmark/calibration.py` |
-| Qwen quantize | `scripts/quantize_qwen_v010.py` |
-| Llama quantize | `scripts/quantize_llmcompressor_v010.py` |
-| Per-scenario harness | `benchmark/run_vlm_benchmark.py` |
-| Per-variant aggregate | `benchmark/hpml_metrics.py` |
-| LLM-as-judge accuracy scorer | `benchmark/llm_judge.py` |
-| W&B logger (centralised) | `benchmark/wandb_logger.py` |
-| Cross-variant dashboard | `benchmark/wandb_summary.py` |
-| Plots (8 IEEE figures) | `benchmark/plots.py` |
-| Result cleanup | `scripts/clean_results.py` |
-| NFR collector | `benchmark/nfr_collector.py` |
-| Vision MCP server | `src/servers/vision/main.py` |
-| Image loader / dataset registry | `src/servers/vision/image_loader.py` |
-| Scenarios | `src/scenarios/local/vision_*.json` |
-| Eric's prior results | `results/eric/HPML_REPORT.md` |
-| Proposal deviations (drives report) | `proposal_edits.md` |
-| Eval methodology | `benchmark_explained.md` |
-| GCP infra | `terraform/` |
+### What did not work
+
+**INT4 quantization hurts Llama accuracy regardless of calibration regime.** Llama L1d drops from 62.5% (FP16) to 50.0%, and Llama L1g drops to 57.1%. Domain calibration helps Qwen accuracy but does not rescue Llama. This asymmetry between the two families is the most surprising result and is an open research question. We suspect the LLaVA NeXT vision tower interaction with the INT4 text tower is more brittle than Qwen's native ViT integration, but we did not isolate the cause within the project window.
+
+**The L2 full bundle serving tuning broke generation on Qwen.** Combining prefix caching, chunked prefill, FP8 key value cache, and a 0.90 GPU memory utilization budget gave the fastest p50 latency of any variant (1,314 ms), but LLM as judge accuracy collapsed to 0% across all sixteen scenarios. The same bundle on Llama did not collapse but also did not help (mean latency 8,922 ms, 50% accuracy). The bundle needs to be unstacked and tuned per component before it is safe to use.
+
+**L3 image preprocessing at 512 px gave no measurable speedup.** Qwen at 512 px ran slightly slower than the FP16 baseline (10,034 ms vs 9,337 ms mean), and Llama at 512 px was unchanged. Vision tokens are not the bottleneck at the batch size and prompt shape we test.
+
+**Generic AWQ calibration showed a runaway generation failure on the prior 25 scenario calibration run.** One of twenty five scenarios hit the token cap at 121.8 seconds. The May 7 sweep at N equals 16 did not reproduce the outlier (max Llama L1g end to end was 7.1 seconds), so the finding is conditional on the larger sample. We document this honestly in the report.
+
+**Quantizing the vision tower or `multi_modal_projector` to INT4 broke generation.** This is well documented for LLaVA family encoders. We kept them at FP16 via `ignore=["re:.*vision_tower.*","re:.*multi_modal_projector.*"]`.
+
+### Engineering bugs diagnosed and worked around
+
+We hit and fixed six distinct integration bugs across the modern quantization to serving stack. Each bug is reproducible from the pinned versions in `pyproject.toml`, and the patches are committed under `scripts/`.
+
+| # | Where | Bug | Fix |
+|---|---|---|---|
+| 1 | llmcompressor 0.3.0 | save flow crashed on `_copy_python_files_from_model_cache` | upgrade to 0.10.0.2 (rewritten save path) |
+| 2 | llmcompressor 0.3.0 | "fake quant FP16" output (no actual packing) | use `save_compressed=True` (only in 0.10+) |
+| 3 | transformers 4.57 LlavaNext | `save_pretrained` `module_map[image_newline]` KeyError | `dispatch_model` + `remove_hook_from_module` + sed patch `if module_map: → if module_map and False:` |
+| 4 | accelerate >= 1.0 | `from accelerate.utils import remove_hook_from_module` ImportError | moved to `accelerate.hooks` |
+| 5 | vLLM 0.19 LlavaNext | `KeyError: 'qkv_proj.weight'` when ignore list expanded vision_tower q/k/v separately | use regex form `re:.*vision_tower.*` instead of expanded names |
+| 6 | mistral_common resolver drift | historical workaround pinned `mistral_common>=1.5,<1.7`; this conflicts with `vllm==0.19.0`, which requires `mistral-common[image]>=1.10.0` | do not pin `mistral_common`; let vLLM install its dependency |
+
+The most consequential of these is bug #2: llmcompressor 0.3.0 silently produced "fake quant FP16" weights with no actual INT4 packing, so the variant *appeared* to load but consumed FP16 weight VRAM. We now verify every checkpoint with [`scripts/verify_checkpoint.py`](scripts/verify_checkpoint.py) against the `compressed-tensors` packed quantized spec before benchmarking.
+
+### Next steps
+
+Submit a pull request to the upstream [IBM/AssetOpsBench](https://github.com/IBM/AssetOpsBench) repository registering the Visual Inspection Agent in AgentHive so it gets dispatched through the standard MetaAgent orchestrator. Run the motor thermal scenarios through the headline harness so all 22 authored scenarios are covered in a single sweep. Investigate the Qwen versus Llama asymmetry under INT4 quantization, possibly by isolating per layer error introduced by the calibration. Decompose the L2 bundle into per component variants to find which combination triggers the Qwen accuracy collapse. Explore whether INT8 (W8A8) preserves accuracy better than INT4 while still fitting on a single L4 with usable key value cache headroom.
+
+![Pareto: latency vs accuracy](results/plots/pareto.png)
+![Weight VRAM breakdown](results/plots/vram_breakdown.png)
 
 ---
 
-## 17. Pre-launch checklist
+## 7. Notes
 
-Before kicking off the VM sweep, walk through this list:
+Source files live under [`src/`](src/), benchmark code under [`benchmark/`](benchmark/), variant configs under [`benchmark/variants/`](benchmark/variants/), shell and quantization scripts under [`scripts/`](scripts/), and infrastructure as code under [`terraform/`](terraform/). Quantized checkpoints are not committed because each is several GB. They are regenerated on the VM via `scripts/quantize_*.py`. Secrets (the OpenAI API key for the LLM as judge step, the Weights and Biases API key, and GCP credentials) are loaded from environment variables. Run `gcloud auth application-default login` and `wandb login` once on the VM, then `export OPENAI_API_KEY=...` for evaluation.
 
-- [ ] `git status` is clean on Windows + VM
-- [ ] `python -m pytest benchmark/tests/ -v` → 17/17 pass on Windows
-- [ ] `python -m benchmark.variants list` → 10 variants
-- [ ] VM started, SSH session open with `-L 8000:localhost:8000`
-- [ ] `nvidia-smi` shows GPU clear (<500 MiB used by other processes)
-- [ ] `df -h ~` shows enough free space for checkpoints
-- [ ] `huggingface-cli login` and `wandb login` both done on VM
-- [ ] Both base models cached: `ls ~/.cache/huggingface/hub/` shows Qwen + Llama
-- [ ] tmux session created for quantize OR you accept babysitting the SSH connection
-- [ ] `WANDB_PROJECT=hpml-assetopsbench-vlm` exported in shell
+The repository is forked from [IBM/AssetOpsBench](https://github.com/IBM/AssetOpsBench). The upstream MCP servers under `src/servers/{iot,fmsr,tsfm,wo,utilities,vibration}` are not modified by this project. The HPML contributions are concentrated in `benchmark/`, `scripts/`, `src/servers/vision/`, `src/agent/`, `src/scenarios/local/`, and `terraform/`.
 
-You're ready. Open the W&B project URL in a browser tab, kick off the
-quantize loop, and watch runs land in real time.
+### Experimental Setup
+
+| Setting | Baseline | Optimized |
+|---|---|---|
+| Batch size | 1 (single image per request) | 1 (unchanged) |
+| Precision | FP16 (weights and activations) | INT4 weights (AWQ W4A16), FP16 activations |
+| Sequence length | Variable (image dependent) | Variable (same) |
+| Eval volume | 16 scenarios per variant, 10 variants | 16 scenarios per variant, 10 variants |
+| Hardware | One NVIDIA L4 24 GB | One NVIDIA L4 24 GB |
+| Software stack | vLLM 0.19.0, transformers 4.57 | vLLM 0.19.0, llmcompressor 0.10.0.2, compressed-tensors 0.14.0.1 |
+
+### AI Use Disclosure
+
+*Per the HPML AI Use Policy posted on CourseWorks. Required for every submission.*
+
+**Did your team use any AI tool in completing this project?**
+
+- [ ] No, we did not use any AI tool.
+- [x] Yes, we used AI assistance as described below.
+
+**Tools used.** Claude (Anthropic) via Claude Code, ChatGPT, GitHub Copilot.
+
+**Specific purpose.** Debugging the llmcompressor, transformers, accelerate, and vLLM integration stack (the six bugs tabulated in §6 "Engineering bugs diagnosed and worked around"). Drafting the LLM as judge prompts. Polishing prose in this README and in the IEEE final report. Scaffolding the variant registry framework under `benchmark/variants/`.
+
+**Sections affected.** `scripts/quantize_llmcompressor_v010.py` (debugging only), `benchmark/llm_judge.py` (prompt drafting), `benchmark/variants/base.py` (scaffold), README §6 results narrative, report §V Discussion.
+
+**How we verified correctness.** Every reported number in §3 was produced by re running the harness ourselves and is traceable to a CSV row under `results/`. Checkpoint formats were verified with `scripts/verify_checkpoint.py` against the `compressed-tensors` packed quantized spec. Profiler trace interpretations were checked against raw traces under `results/`. AI suggested code was reviewed line by line and re tested against the unit tests under `benchmark/tests/` before being merged.
+
+By submitting this project, the team confirms that the analysis, interpretations, and conclusions are our own, and that any AI assistance is fully disclosed above. The same disclosure block appears as an appendix in the final report.
+
+### License
+
+Released under the MIT License. See [`LICENSE`](LICENSE).
+
+### Citation
+
+If you build on this work, please cite:
+
+```bibtex
+@misc{team23hpml2026,
+  title  = {Multi-Modal Agent Inference Optimization for Industrial Asset Operations},
+  author = {Sheikh, Amaan and Upganlawar, Aman and Rajkondawar, Madhav and Chen, Yang Jung},
+  year   = {2026},
+  note   = {HPML Spring 2026 Final Project, Columbia University},
+  url    = {https://github.com/amaan784/hpml-final-project}
+}
+```
+
+This work builds on the upstream [AssetOpsBench](https://github.com/IBM/AssetOpsBench) benchmark (Patel et al., 2025).
+
+### Contact
+
+Open a GitHub Issue or email the team (UNIs above @columbia.edu).
+
+---
+
+*HPML Spring 2026 — Dr. Kaoutar El Maghraoui — Columbia University*
