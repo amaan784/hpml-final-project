@@ -249,6 +249,9 @@ uv pip install --python .venv/bin/python --torch-backend=cu129 \
   "matplotlib>=3.8" \
   "pillow>=10.0" \
   "ninja"   # required (with g++ above) for vLLM's flashinfer JIT in the L2 variants
+
+# Activate environment
+source .venv/bin/activate
 ```
 
 `uv sync --locked` alone will not install the CUDA / vLLM stack - both steps are required.
@@ -277,13 +280,6 @@ Logging is implemented in [`benchmark/wandb_logger.py`](benchmark/wandb_logger.p
 The scenarios are hand authored and committed under [`src/scenarios/local/`](src/scenarios/local/). The image assets they reference are not all committed, only a representative subset that lets the harness smoke test without external downloads. Source, license, and size for each of the four datasets are summarized in Section 2 above.
 
 The calibration corpus is generated programmatically.
-
-```bash
-# Domain calibration: 128 substation inspection text prompts
-python -c "from benchmark.calibration import SUBSTATION_TEXTS; print(len(SUBSTATION_TEXTS))"
-
-# Generic calibration: 128 samples from HuggingFaceH4/ultrachat_200k (downloaded on the fly)
-```
 
 ### D. Quantization (replaces "Training")
 
