@@ -484,7 +484,7 @@ The repository is forked from [IBM/AssetOpsBench](https://github.com/IBM/AssetOp
 
 ### AI Use Disclosure
 
-*Per the HPML AI Use Policy posted on CourseWorks. Required for every submission.*
+*Per the HPML AI Use Policy posted on CourseWorks.*
 
 **Did your team use any AI tool in completing this project?**
 
