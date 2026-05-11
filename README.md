@@ -26,6 +26,9 @@ We extended [AssetOpsBench](https://github.com/IBM/AssetOpsBench) (AAAI 2026) wi
 * **Final report:** [`report/main.tex`](report/main.tex) (PDF compiled at submission time, also under `deliverables/HPML_Final_Report.pdf`)
 * **Final presentation:** [`presentation/HPML Final Presentation Slides.pptx`](presentation/HPML%20Final%20Presentation%20Slides.pptx)
 * **Experiment tracking dashboard:** [https://wandb.ai/amaan784-columbia-university/hpml-final-benchmark](https://wandb.ai/amaan784-columbia-university/hpml-final-benchmark?nw=nwusermr4650)
+* **Medium article:** [How We Made an Industrial AI Agent 2x Faster and More Accurate on a $0.70/hour GPU](https://medium.com/@aman.upg27024/how-we-made-an-industrial-ai-agent-2x-faster-and-more-accurate-on-a-0-70-hour-7ce5985098cb)
+* **Hugging Face Qwen quantized model:** [amaan784/Qwen2.5-VL-7B-AWQ-W4A16-substation](https://huggingface.co/amaan784/Qwen2.5-VL-7B-AWQ-W4A16-substation)
+* **Hugging Face Llama quantized model:** [amaan784/Llama3-LLaVA-NeXT-8B-AWQ-W4A16-substation](https://huggingface.co/amaan784/Llama3-LLaVA-NeXT-8B-AWQ-W4A16-substation)
 
 The final report PDF and the presentation file are checked into the `deliverables/` folder of this repository and uploaded to CourseWorks at submission.
 
@@ -228,8 +231,8 @@ If a future DLVM image ships with a different default `gcc` major version, insta
 **On the VM, set up the repo and dependencies:**
 
 ```bash
-git clone https://github.com/amaan784/hpml-final-project HPML-AssetOpsBench
-cd ~/HPML-AssetOpsBench
+git clone https://github.com/amaan784/hpml-final-project.git
+cd ~/hpml-final-project
 
 # uv (already on the DLVM image; install if missing: `curl -LsSf https://astral.sh/uv/install.sh | sh`)
 # Base deps from the locked dependency graph:
@@ -305,13 +308,13 @@ python scripts/verify_checkpoint.py models/qwen2.5-vl-7b-awq-domain
 The recommended path is the one-command sweep via [`scripts/overnight.sh`](scripts/overnight.sh). It builds any missing AWQ checkpoints, runs all 10 variants end to end, scrapes vLLM Prometheus + nvidia-smi for HPML metrics, runs LLM-as-judge if `OPENAI_API_KEY` is set, generates plots, and uploads a W&B summary. Total wall clock is roughly 6-8 hours on a single L4.
 
 ```bash
-cd ~/HPML-AssetOpsBench
+cd ~/hpml-final-project
 
 # Run inside tmux so a dropped SSH does not kill the sweep
 tmux new -s overnight
 
 # Inside the tmux session
-cd ~/HPML-AssetOpsBench
+cd ~/hpml-final-project
 CLEAN_RESULTS=1 QUANTIZE_MISSING=1 QUANTIZE_LLAMA=1 \
   bash scripts/overnight.sh 2>&1 | tee results/overnight.log
 
@@ -391,11 +394,11 @@ bash scripts/setup_vm.sh ssh
 
 # 2. On the VM: install env per Section A (uv sync + GPU pip install + wandb login + OPENAI_API_KEY)
 #    Then kick off the full sweep inside tmux so SSH drops do not kill the run:
-cd ~/HPML-AssetOpsBench
+cd ~/hpml-final-project
 tmux new -s overnight
 
 # Inside tmux:
-cd ~/HPML-AssetOpsBench
+cd ~/hpml-final-project
 export OPENAI_API_KEY=sk-...           # optional, enables LLM-as-judge
 CLEAN_RESULTS=1 QUANTIZE_MISSING=1 QUANTIZE_LLAMA=1 \
   bash scripts/overnight.sh 2>&1 | tee results/overnight.log
@@ -490,9 +493,9 @@ The repository is forked from [IBM/AssetOpsBench](https://github.com/IBM/AssetOp
 
 **Tools used.** Claude (Anthropic) via Claude Code, ChatGPT, GitHub Copilot.
 
-**Specific purpose.** Debugging the llmcompressor, transformers, accelerate, and vLLM integration stack (the six bugs tabulated in Section 6 "Engineering bugs diagnosed and worked around"). Drafting the LLM as judge prompts. Polishing prose in this README and in the IEEE final report. Scaffolding the variant registry framework under `benchmark/variants/`.
+**Specific purpose.** Creating the Visual Inspection Agent workflow and integrating it with AssetOpsBench, following the professor's recommendation to use AI assistance for agent creation. Debugging the AssetOpsBench repo setup/startup path so the local agent and benchmark harness could run. Debugging the llmcompressor, transformers, accelerate, and vLLM integration stack (the six bugs tabulated in Section 6 "Engineering bugs diagnosed and worked around"). Drafting the LLM as judge prompts. Polishing prose in this README and in the IEEE final report. Scaffolding the variant registry framework under `benchmark/variants/`.
 
-**Sections affected.** `scripts/quantize_llmcompressor_v010.py` (debugging only), `benchmark/llm_judge.py` (prompt drafting), `benchmark/variants/base.py` (scaffold), README Section 6 results narrative, report Section V Discussion.
+**Sections affected.** `src/agent/`, `src/servers/vision/`, and `src/scenarios/local/` (AssetOpsBench Visual Inspection Agent integration), `benchmark/` (benchmark harness integration and startup debugging), `scripts/quantize_llmcompressor_v010.py` (debugging only), `benchmark/llm_judge.py` (prompt drafting), `benchmark/variants/base.py` (scaffold), README prose and results narrative, and final report prose, especially Section V Discussion.
 
 **How we verified correctness.** Every reported number in Section 3 was produced by re running the harness ourselves and is traceable to a CSV row under `results/`. Checkpoint formats were verified with `scripts/verify_checkpoint.py` against the `compressed-tensors` packed quantized spec. Profiler trace interpretations were checked against raw traces under `results/`. AI suggested code was reviewed line by line and re tested against the unit tests under `benchmark/tests/` before being merged.
 
