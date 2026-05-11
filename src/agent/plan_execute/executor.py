@@ -15,12 +15,6 @@ _REPO_ROOT = Path(__file__).parent.parent.parent.parent
 
 # server name -> uv script name or path to python -m target
 DEFAULT_SERVER_PATHS: dict[str, Path | str] = {
-    "iot": "iot-mcp-server",
-    "utilities": "utilities-mcp-server",
-    "fmsr": "fmsr-mcp-server",
-    "tsfm": "tsfm-mcp-server",
-    "wo": "wo-mcp-server",
-    "vibration": "vibration-mcp-server",
     "vision": "vision-mcp-server",
 }
 

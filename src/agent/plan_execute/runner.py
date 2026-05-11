@@ -6,9 +6,8 @@ from pathlib import Path
 from llm import LLMBackend
 
 from .executor import Executor
+from .models import OrchestratorResult
 from .planner import Planner
-from ..models import OrchestratorResult
-from ..runner import AgentRunner
 
 _log = logging.getLogger(__name__)
 
@@ -26,13 +25,13 @@ above. Do not repeat the individual steps - just give the final answer.
 """
 
 
-class PlanExecuteRunner(AgentRunner):
+class PlanExecuteRunner:
     def __init__(
         self,
         llm: LLMBackend,
         server_paths: dict[str, Path | str] | None = None,
     ) -> None:
-        super().__init__(llm, server_paths)
+        self._llm = llm
         self._planner = Planner(llm)
         self._executor = Executor(llm, server_paths)
 
