@@ -5,7 +5,7 @@
 > **Instructor:** Dr. Kaoutar El Maghraoui
 > **University:** Columbia University
 
-We extended [AssetOpsBench](https://github.com/IBM/AssetOpsBench) (AAAI 2026) with a multi modal Visual Inspection Agent and applied AWQ W4A16 quantization. On a single NVIDIA L4 GPU, domain calibrated INT4 cuts mean end to end latency by 1.98x on Qwen2.5 VL 7B and 2.47x on Llama 3 LLaVA NeXT 8B, with weight VRAM dropping from 15.5 GiB to 5.9 GiB on the Llama family.
+We extended [AssetOpsBench](https://github.com/IBM/AssetOpsBench) (AAAI 2026) with a multi modal Visual Inspection Agent and applied AWQ W4A16 quantization. On a single NVIDIA L4 GPU, domain calibrated INT4 cuts mean end to end latency by 1.99x on Qwen2.5 VL 7B and 2.46x on Llama 3 LLaVA NeXT 8B, with weight VRAM dropping from 15.5 GiB to 5.9 GiB on the Llama family.
 
 ---
 
@@ -35,7 +35,7 @@ The final report PDF and the presentation file are checked into the `deliverable
 
 AssetOpsBench (AAAI 2026) covers 141 industrial AI scenarios across text and time series modalities, but it has no vision component. That gap matters in practice because many failure modes (corrosion, ice buildup, bearing damage, casting defects, transformer hot spots) are visible long before sensor data flags them. The natural way to close the gap is to bring a vision language model into the AssetOpsBench agent loop, but doing that on commodity hardware is expensive. At FP16, Llama 3 LLaVA NeXT 8B occupies 15.5 GiB of weight VRAM and produces a 9.3 second per query mean latency on a single NVIDIA L4, which leaves almost no key value cache headroom for batched multi agent workloads.
 
-A naive INT4 quantization (using a generic calibration corpus) appears faster on average. On the prior 25 scenario calibration run, generic INT4 also surfaced a runaway generation failure on roughly one of every twenty five scenarios, where the model hits the token cap at around 122 seconds. That kind of tail behavior is unacceptable for industrial deployment.
+A naive INT4 quantization (using a generic calibration corpus) appears faster on average, but it also surfaces a runaway generation failure mode: in the final 22-scenario sweep, two Llama L1g transformer scenarios timed out at the token cap at around 122 seconds (dropping its judged denominator from 44 to 40). That kind of tail behavior is unacceptable for industrial deployment.
 
 This project targets inference side optimization. We add a vision modality to AssetOpsBench through a VLM powered MCP agent, then we make it cheap and reliable on a single NVIDIA L4 GPU through quantization, calibration regime selection, vLLM serving tuning, and image preprocessing changes.
 
@@ -76,29 +76,29 @@ The calibration corpus in [`benchmark/calibration.py`](benchmark/calibration.py)
 
 ## 3. Final Results Summary
 
-The headline numbers come from the May 7 sweep, which ran 16 scenarios per variant across 10 variants. The motor thermal scenarios (Madhav, six scenarios) were authored but did not flow through the headline harness. Their results live separately in [`results/madhav/motor_summary.csv`](results/madhav/motor_summary.csv).
+The headline numbers come from the final 22-scenario sweep covering all four asset classes (5 pump + 6 transformer + 5 turbine + 6 motor), across 10 optimization variants. Each scenario is judged twice by `gpt-4o-mini` (pass when score ≥ 4), giving a maximum denominator of 44 per variant. Raw per-variant data is in [`results/hpml_metrics.csv`](results/hpml_metrics.csv); per-scenario judge scores are in [`results/llm_judge.csv`](results/llm_judge.csv).
 
 ### 3.1 Qwen2.5 VL 7B, primary track
 
 | Metric | Baseline FP16 (L0) | Optimized AWQ W4A16 domain (L1d) | Improvement |
 |---|---:|---:|---|
-| LLM as judge accuracy | 68.8% | **87.5%** | **+18.7 pp** |
-| Mean end to end latency | 9,337 ms | **4,711 ms** | **1.98x faster** |
-| p50 end to end latency | 5,540 ms | 4,293 ms | 1.29x faster |
+| LLM as judge accuracy | 47.7% (21/44) | **81.8% (36/44)** | **+34.1 pp** |
+| Mean end to end latency | 9,437 ms | **4,752 ms** | **1.99x faster** |
+| p50 end to end latency | 5,915 ms | 4,312 ms | 1.37x faster |
 
 ### 3.2 Llama 3 LLaVA NeXT 8B, cross family baseline
 
 | Metric | Baseline FP16 (L0) | Optimized AWQ W4A16 generic (L1g) | Improvement |
 |---|---:|---:|---|
-| Mean end to end latency | 9,272 ms | **3,270 ms** | **2.84x faster** |
-| p50 end to end latency | 9,132 ms | 3,014 ms | 3.03x faster |
-| LLM as judge accuracy | 62.5% | 57.1% | 5.4 pp lower |
+| Mean end to end latency | 9,203 ms | **3,157 ms** | **2.92x faster** |
+| p50 end to end latency | 9,384 ms | 3,136 ms | 2.99x faster |
+| LLM as judge accuracy | 52.3% (23/44) | 40.0% (16/40) | 12.3 pp lower |
 
-For the Llama track, the L1d (domain) variant gives 2.47x mean speedup at 50% accuracy. From Eric's prior 25 scenario run, the Llama family showed a 2.6x weight VRAM reduction (15.54 GiB to 5.9 GiB) and a 4.7x growth in the key value cache pool (21K to 100K concurrent tokens), confirmed from vLLM's `gpu_model_runner` startup logs.
+For the Llama track, the L1d (domain) variant gives 2.46x mean speedup at 59.1% accuracy (26/44). The Llama family also shows a 2.6x weight VRAM reduction (15.54 GiB to 5.9 GiB) and a 4.7x growth in the key value cache pool (21K to 100K concurrent tokens), confirmed from vLLM's `gpu_model_runner` startup logs. The L1g denominator is 40 (not 44) due to a logging gap on two transformer scenarios.
 
 **Hardware.** One NVIDIA L4 24 GB on GCP `g2-standard-8`, CUDA 12.9, vLLM 0.19, PyTorch, Ubuntu 22.04.
 
-**Headline result.** AWQ W4A16 quantization with domain matched calibration on Qwen2.5 VL 7B nearly halves mean end to end inference latency (9.34 s to 4.71 s, 1.98x) while improving LLM as judge accuracy from 68.8% to 87.5% on a single L4 GPU. The Qwen and Llama families respond differently to INT4 quantization: Qwen accuracy improves under domain calibration, while Llama accuracy regresses regardless of calibration regime. We discuss this asymmetry in Section 6.
+**Headline result.** AWQ W4A16 quantization with domain matched calibration on Qwen2.5 VL 7B nearly halves mean end to end inference latency (9.44 s to 4.75 s, 1.99x) while improving LLM as judge accuracy from 47.7% to 81.8% on a single L4 GPU. The Qwen and Llama families respond differently to INT4 quantization: Qwen accuracy improves under domain calibration, while Llama accuracy regresses regardless of calibration regime. We discuss this asymmetry in Section 6.
 
 ---
 
@@ -416,11 +416,11 @@ If you only want the Qwen 3-variant headline (FP16, domain INT4, generic INT4) w
 
 ### What worked
 
-**Domain calibrated AWQ W4A16 on Qwen is the headline win.** Mean end to end latency drops from 9.34 s to 4.71 s, a 1.98x speedup, and LLM as judge accuracy improves from 68.8% to 87.5%. Qwen is the only family where INT4 quantization actually helps task quality.
+**Domain calibrated AWQ W4A16 on Qwen is the headline win.** Mean end to end latency drops from 9.44 s to 4.75 s, a 1.99x speedup, and LLM as judge accuracy improves from 47.7% (21/44) to 81.8% (36/44), an absolute +34.1 pp gain. Qwen is the family that responds best to INT4 quantization on task quality.
 
-**AWQ W4A16 is reliable as a speedup mechanism on both families.** Qwen domain achieves 1.98x and Llama generic achieves 2.84x mean speedup. The latency win is real even when accuracy does not improve.
+**AWQ W4A16 is a reliable speedup mechanism on both families.** Qwen domain achieves 1.99x and Llama generic achieves 2.92x mean speedup; Llama domain achieves 2.46x. The latency win is real on every variant; accuracy depends on the calibration regime.
 
-**Real INT4 packing was confirmed end to end.** 16 GB of FP16 weights compress to roughly 6.0 GB on disk in `compressed-tensors` packed quantized format, a 2.7x reduction. Runtime weight VRAM dropped from 15.54 GiB to 5.9 GiB on the Llama family on Eric's prior 25 scenario run, confirmed in vLLM's `gpu_model_runner` startup logs.
+**Real INT4 packing was confirmed end to end.** 16 GB of FP16 weights compress to roughly 6.0 GB on disk in `compressed-tensors` packed quantized format, a 2.7x reduction. Runtime weight VRAM drops from 15.54 GiB to 5.9 GiB on the Llama family, confirmed in vLLM's `gpu_model_runner` startup logs. The freed 9.6 GiB is reabsorbed by the key value cache pool, which grows from 21K to 100K concurrent tokens (4.7x).
 
 **Dual purpose VLM serving on a single L4** (planner role and vision tool role on the same model) eliminated the WatsonX API dependency entirely.
 
@@ -428,13 +428,13 @@ If you only want the Qwen 3-variant headline (FP16, domain INT4, generic INT4) w
 
 ### What did not work
 
-**INT4 quantization hurts Llama accuracy regardless of calibration regime.** Llama L1d drops from 62.5% (FP16) to 50.0%, and Llama L1g drops to 57.1%. Domain calibration helps Qwen accuracy but does not rescue Llama. This asymmetry between the two families is the most surprising result and is an open research question. We suspect the LLaVA NeXT vision tower interaction with the INT4 text tower is more brittle than Qwen's native ViT integration, but we did not isolate the cause within the project window.
+**Llama responds asymmetrically to INT4 calibration.** With domain calibration, Llama L1d improves slightly to 59.1% (26/44) vs the 52.3% (23/44) FP16 baseline. With generic calibration, Llama L1g drops to 40.0% (16/40), well below FP16. So INT4 is *not* universally harmful on Llama — but it is brittle, and the calibration corpus matters more than on Qwen. We suspect the LLaVA NeXT vision tower interaction with the INT4 text tower is more sensitive to calibration distribution than Qwen's native ViT integration, but we did not isolate the cause within the project window.
 
-**The L2 full bundle serving tuning broke generation on Qwen.** Combining prefix caching, chunked prefill, FP8 key value cache, and a 0.90 GPU memory utilization budget gave the fastest p50 latency of any variant (1,314 ms), but LLM as judge accuracy collapsed to 0% across all sixteen scenarios. The same bundle on Llama did not collapse but also did not help (mean latency 8,922 ms, 50% accuracy). The bundle needs to be unstacked and tuned per component before it is safe to use.
+**The L2 full bundle serving tuning broke generation on Qwen.** Combining prefix caching, chunked prefill, FP8 key value cache, and a 0.90 GPU memory utilization budget gave the fastest p50 latency of any variant (1,157 ms), but LLM as judge accuracy collapsed to 0/44 across all twenty-two scenarios. The same bundle on Llama did not collapse but also did not help (mean latency 8,860 ms, 20/44 = 45.5% accuracy, a 7 pp drop from FP16). The bundle needs to be unstacked and tuned per component before it is safe to use; we suspect the FP8 KV-cache quantization corrupts the long visual-token prefix.
 
-**L3 image preprocessing at 512 px gave no measurable speedup.** Qwen at 512 px ran slightly slower than the FP16 baseline (10,034 ms vs 9,337 ms mean), and Llama at 512 px was unchanged. Vision tokens are not the bottleneck at the batch size and prompt shape we test.
+**L3 image preprocessing at 512 px gave no measurable speedup.** Qwen at 512 px ran slightly slower than the FP16 baseline (9,920 ms vs 9,437 ms mean), and Llama at 512 px was effectively unchanged (9,278 ms vs 9,203 ms). Fixed-tile vision encoders do not sufficiently reduce visual-token count at 512 px; the "knee" is likely between 256 and 384 px.
 
-**Generic AWQ calibration showed a runaway generation failure on the prior 25 scenario calibration run.** One of twenty five scenarios hit the token cap at 121.8 seconds. The May 7 sweep at N equals 16 did not reproduce the outlier (max Llama L1g end to end was 7.1 seconds), so the finding is conditional on the larger sample. We document this honestly in the report.
+**Generic AWQ calibration on Llama L1g hit a token-cap runaway.** Two L1g transformer scenarios timed out at ~122 seconds, which is why the L1g denominator is 40 (not 44) in §3.2. Domain calibration did not exhibit this failure mode on any scenario, reinforcing the case for domain-matched calibration in production.
 
 **Quantizing the vision tower or `multi_modal_projector` to INT4 broke generation.** This is well documented for LLaVA family encoders. We kept them at FP16 via `ignore=["re:.*vision_tower.*","re:.*multi_modal_projector.*"]`.
 
@@ -475,7 +475,7 @@ The repository is forked from [IBM/AssetOpsBench](https://github.com/IBM/AssetOp
 | Batch size | 1 (single image per request) | 1 (unchanged) |
 | Precision | FP16 (weights and activations) | INT4 weights (AWQ W4A16), FP16 activations |
 | Sequence length | Variable (image dependent) | Variable (same) |
-| Eval volume | 16 scenarios per variant, 10 variants | 16 scenarios per variant, 10 variants |
+| Eval volume | 22 scenarios per variant, 10 variants | 22 scenarios per variant, 10 variants |
 | Hardware | One NVIDIA L4 24 GB | One NVIDIA L4 24 GB |
 | Software stack | vLLM 0.19.0, transformers 4.57 | vLLM 0.19.0, llmcompressor 0.10.0.2, compressed-tensors 0.14.0.1 |
 
