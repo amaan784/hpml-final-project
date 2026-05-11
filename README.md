@@ -98,7 +98,7 @@ For the Llama track, the L1d (domain) variant gives 2.47x mean speedup at 50% ac
 
 **Hardware.** One NVIDIA L4 24 GB on GCP `g2-standard-8`, CUDA 12.9, vLLM 0.19, PyTorch, Ubuntu 22.04.
 
-**Headline result.** AWQ W4A16 quantization with domain matched calibration on Qwen2.5 VL 7B nearly halves mean end to end inference latency (9.34 s to 4.71 s, 1.98x) while improving LLM as judge accuracy from 68.8% to 87.5% on a single L4 GPU. The Qwen and Llama families respond differently to INT4 quantization: Qwen accuracy improves under domain calibration, while Llama accuracy regresses regardless of calibration regime. We discuss this asymmetry in §6.
+**Headline result.** AWQ W4A16 quantization with domain matched calibration on Qwen2.5 VL 7B nearly halves mean end to end inference latency (9.34 s to 4.71 s, 1.98x) while improving LLM as judge accuracy from 68.8% to 87.5% on a single L4 GPU. The Qwen and Llama families respond differently to INT4 quantization: Qwen accuracy improves under domain calibration, while Llama accuracy regresses regardless of calibration regime. We discuss this asymmetry in Section 6.
 
 ---
 
@@ -106,77 +106,77 @@ For the Llama track, the L1d (domain) variant gives 2.47x mean speedup at 50% ac
 
 ```
 .
-├── README.md
-├── pyproject.toml                         uv and hatch project, pinned deps and entry points
-├── uv.lock
-├── benchmark/                             HPML benchmark harness, variants, evaluation, plots
-│   ├── calibration.py                     128 domain-specific calibration prompts
-│   ├── compare_agents.py
-│   ├── concurrent_load.py                 L2 throughput stress driver
-│   ├── hpml_metrics.py                    vLLM Prometheus and nvidia-smi scrape
-│   ├── llm_judge.py                       LLM-as-judge scoring
-│   ├── nfr_collector.py
-│   ├── plots.py                           eight publication-quality figures
-│   ├── profile_single.py
-│   ├── profile_vision_encoder.py          ViT op-level PyTorch profiler
-│   ├── run_agent_benchmark.py             ReAct vs Plan-Execute comparison driver
-│   ├── run_vlm_benchmark.py               per-variant harness (MCP to vLLM)
-│   ├── wandb_logger.py                    per-variant Weights & Biases run logger
-│   ├── wandb_summary.py                   cross-variant summary tables and plots
-│   ├── tests/                             17-case variant registry test suite
-│   │   └── test_variants.py
-│   └── variants/                          ten variant configs, L0 through L3 for both families
-│       ├── base.py
-│       ├── L0_baseline.py
-│       ├── L0_llama_baseline.py
-│       ├── L1_awq_w4a16_domain.py
-│       ├── L1_awq_w4a16_generic.py
-│       ├── L1_llama_awq_w4a16_domain.py
-│       ├── L1_llama_awq_w4a16_generic.py
-│       ├── L2_full_bundle.py
-│       ├── L2_llama_full_bundle.py
-│       ├── L3_image_512.py
-│       └── L3_llama_image_512.py
-├── scripts/
-│   ├── clean_results.py
-│   ├── iap_tunnel.sh
-│   ├── overnight.sh                       full pipeline (preflight, quant, sweep, judge, summary)
-│   ├── quantize_llmcompressor_v010.py     Llama GPTQ W4A16
-│   ├── quantize_qwen_v010.py              Qwen GPTQ W4A16 with FX patches
-│   ├── run_full_bench.sh                  ten-variant sweep, fault-tolerant
-│   ├── serve_and_bench.sh                 per-variant serve and bench
-│   ├── serve_vllm.sh                      vLLM startup wrapper
-│   ├── setup_vm.sh                        GCP L4 VM provisioning helper
-│   └── verify_checkpoint.py
-├── src/
-│   ├── agent/
-│   │   ├── plan_execute/                  Plan-Execute runner
-│   │   └── react/                         ReAct runner
-│   ├── llm/                               litellm and vLLM client abstractions
-│   ├── scenarios/local/                   hand-authored vision scenarios across four domains
-│   │   ├── vision_pump_scenarios.json
-│   │   ├── vision_transformer_scenarios.json
-│   │   ├── vision_turbine_scenarios.json
-│   │   └── vision_utterance_motor.json
-│   └── servers/vision/                    custom MCP vision server (HPML)
-│       ├── image_loader.py
-│       ├── main.py
-│       └── vlm_client.py
-├── terraform/                             GCP L4 VM infrastructure as code
-│   ├── compute.tf
-│   ├── main.tf
-│   ├── network.tf
-│   ├── outputs.tf
-│   ├── secrets.tf
-│   ├── startup.sh
-│   ├── storage.tf
-│   ├── terraform.tfvars.example
-│   └── variables.tf
-├── results/                               logs, CSVs, and figures from benchmark runs
-│   └── plots/                             eight publication-quality figures
-└── deliverables/                          final PDF and report — same files uploaded to CourseWorks
-    ├── HPML_Final_Report.pdf
-    └── HPML_Final_Presentation.pdf
+|-- README.md
+|-- pyproject.toml                         uv and hatch project, pinned deps and entry points
+|-- uv.lock
+|-- benchmark/                             HPML benchmark harness, variants, evaluation, plots
+|   |-- calibration.py                     128 domain-specific calibration prompts
+|   |-- compare_agents.py
+|   |-- concurrent_load.py                 L2 throughput stress driver
+|   |-- hpml_metrics.py                    vLLM Prometheus and nvidia-smi scrape
+|   |-- llm_judge.py                       LLM-as-judge scoring
+|   |-- nfr_collector.py
+|   |-- plots.py                           eight publication-quality figures
+|   |-- profile_single.py
+|   |-- profile_vision_encoder.py          ViT op-level PyTorch profiler
+|   |-- run_agent_benchmark.py             ReAct vs Plan-Execute comparison driver
+|   |-- run_vlm_benchmark.py               per-variant harness (MCP to vLLM)
+|   |-- wandb_logger.py                    per-variant Weights & Biases run logger
+|   |-- wandb_summary.py                   cross-variant summary tables and plots
+|   |-- tests/                             17-case variant registry test suite
+|   |   `-- test_variants.py
+|   `-- variants/                          ten variant configs, L0 through L3 for both families
+|       |-- base.py
+|       |-- L0_baseline.py
+|       |-- L0_llama_baseline.py
+|       |-- L1_awq_w4a16_domain.py
+|       |-- L1_awq_w4a16_generic.py
+|       |-- L1_llama_awq_w4a16_domain.py
+|       |-- L1_llama_awq_w4a16_generic.py
+|       |-- L2_full_bundle.py
+|       |-- L2_llama_full_bundle.py
+|       |-- L3_image_512.py
+|       `-- L3_llama_image_512.py
+|-- scripts/
+|   |-- clean_results.py
+|   |-- iap_tunnel.sh
+|   |-- overnight.sh                       full pipeline (preflight, quant, sweep, judge, summary)
+|   |-- quantize_llmcompressor_v010.py     Llama GPTQ W4A16
+|   |-- quantize_qwen_v010.py              Qwen GPTQ W4A16 with FX patches
+|   |-- run_full_bench.sh                  ten-variant sweep, fault-tolerant
+|   |-- serve_and_bench.sh                 per-variant serve and bench
+|   |-- serve_vllm.sh                      vLLM startup wrapper
+|   |-- setup_vm.sh                        GCP L4 VM provisioning helper
+|   `-- verify_checkpoint.py
+|-- src/
+|   |-- agent/
+|   |   |-- plan_execute/                  Plan-Execute runner
+|   |   `-- react/                         ReAct runner
+|   |-- llm/                               litellm and vLLM client abstractions
+|   |-- scenarios/local/                   hand-authored vision scenarios across four domains
+|   |   |-- vision_pump_scenarios.json
+|   |   |-- vision_transformer_scenarios.json
+|   |   |-- vision_turbine_scenarios.json
+|   |   `-- vision_utterance_motor.json
+|   `-- servers/vision/                    custom MCP vision server (HPML)
+|       |-- image_loader.py
+|       |-- main.py
+|       `-- vlm_client.py
+|-- terraform/                             GCP L4 VM infrastructure as code
+|   |-- compute.tf
+|   |-- main.tf
+|   |-- network.tf
+|   |-- outputs.tf
+|   |-- secrets.tf
+|   |-- startup.sh
+|   |-- storage.tf
+|   |-- terraform.tfvars.example
+|   `-- variables.tf
+|-- results/                               logs, CSVs, and figures from benchmark runs
+|   `-- plots/                             eight publication-quality figures
+`-- deliverables/                          final PDF and report - same files uploaded to CourseWorks
+    |-- HPML_Final_Report.pdf
+    `-- HPML_Final_Presentation.pdf
 ```
 
 > **Note:** Quantized checkpoints are not committed; they are regenerated on the VM via `scripts/quantize_*.py`.
@@ -196,7 +196,7 @@ bash scripts/setup_vm.sh ssh              # SSH via IAP tunnel
 
 The VM uses Deep Learning VM image `common-cu129-ubuntu-2204-nvidia-580` (CUDA 12.9 preinstalled) and `--no-address` (Columbia org-policy compatible). Cloud NAT in `us-west4` (or whichever region the VM lands in) is required for outbound HuggingFace / pip pulls.
 
-**System packages on the VM.** The DLVM image ships with `gcc-12` (`/usr/bin/gcc → /usr/bin/gcc-12`) but not the matching `g++-12` / `cc1plus`, which vLLM's flashinfer JIT needs to compile CUDA C++ kernels for the L2 prefix-caching variants. nvcc shells out to `gcc` for `.cu` files, and `gcc` looks for `cc1plus` under its own version-matched path (`/usr/lib/gcc/x86_64-linux-gnu/12/cc1plus`); without the matching `g++-12` package installed, that path is missing and the build fails with `gcc: fatal error: cannot execute 'cc1plus'`. Install `g++-12` and register both `gcc` and `g++` as version-12 alternatives so they stay in sync:
+**System packages on the VM.** The DLVM image ships with `gcc-12` (`/usr/bin/gcc -> /usr/bin/gcc-12`) but not the matching `g++-12` / `cc1plus`, which vLLM's flashinfer JIT needs to compile CUDA C++ kernels for the L2 prefix-caching variants. nvcc shells out to `gcc` for `.cu` files, and `gcc` looks for `cc1plus` under its own version-matched path (`/usr/lib/gcc/x86_64-linux-gnu/12/cc1plus`); without the matching `g++-12` package installed, that path is missing and the build fails with `gcc: fatal error: cannot execute 'cc1plus'`. Install `g++-12` and register both `gcc` and `g++` as version-12 alternatives so they stay in sync:
 
 ```bash
 sudo apt-get update
@@ -206,7 +206,7 @@ sudo apt-get install -y g++-12
 # wires /usr/bin/gcc as a plain symlink (not via update-alternatives), so the
 # `--install` step is required before `--set` will accept them. flashinfer's
 # JIT also link-step shells out to the unversioned `c++` (a separate Debian
-# alternative from `g++`), so it must be registered too — otherwise the build
+# alternative from `g++`), so it must be registered too - otherwise the build
 # fails at the final shared-library link with `/bin/sh: 1: c++: not found`.
 # Priority 120 overrides any prior mis-registration of gcc-11.
 sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 120
@@ -223,7 +223,7 @@ c++ --version    # 12.3.0 (linker uses this)
 ls /usr/lib/gcc/x86_64-linux-gnu/12/cc1plus    # must exist
 ```
 
-If a future DLVM image ships with a different default `gcc` major version, install the matching `g++-N` and substitute `12` → `N` in the commands above. The rule is: `g++` major version must equal `gcc` major version, and the `cc1plus` binary at `/usr/lib/gcc/x86_64-linux-gnu/<N>/cc1plus` must exist.
+If a future DLVM image ships with a different default `gcc` major version, install the matching `g++-N` and substitute `12` -> `N` in the commands above. The rule is: `g++` major version must equal `gcc` major version, and the `cc1plus` binary at `/usr/lib/gcc/x86_64-linux-gnu/<N>/cc1plus` must exist.
 
 **On the VM, set up the repo and dependencies:**
 
@@ -251,7 +251,7 @@ uv pip install --python .venv/bin/python --torch-backend=cu129 \
   "ninja"   # required (with g++ above) for vLLM's flashinfer JIT in the L2 variants
 ```
 
-`uv sync --locked` alone will not install the CUDA / vLLM stack — both steps are required.
+`uv sync --locked` alone will not install the CUDA / vLLM stack - both steps are required.
 
 **Authentication:**
 
@@ -260,13 +260,13 @@ wandb login                               # paste API key from https://wandb.ai/
 export OPENAI_API_KEY=sk-...              # required for the LLM-as-judge step
 ```
 
-**System requirements.** Python 3.12+, CUDA 12.9, ≥ 24 GB GPU memory (L4 / A10G / 4090 class). The local development side only needs Python and the harness because model serving runs on the VM.
+**System requirements.** Python 3.12+, CUDA 12.9, >= 24 GB GPU memory (L4 / A10G / 4090 class). The local development side only needs Python and the harness because model serving runs on the VM.
 
 ### B. Experiment Tracking Dashboard
 
 We log every variant run to Weights and Biases under the `hpml-assetopsbench-vlm` project. Each run records per scenario timing rows, system metrics scraped from the vLLM Prometheus endpoint, and a baseline vs optimized comparison table. The cross variant W&B Report walks through the FP16, quant, serving tuning, and preprocessing sweep on both Qwen and Llama families.
 
-> **🔗 Dashboard:** [https://wandb.ai/amaan784-columbia-university/hpml-final-benchmark](https://wandb.ai/amaan784-columbia-university/hpml-final-benchmark?nw=nwusermr4650)
+> **Dashboard:** [https://wandb.ai/amaan784-columbia-university/hpml-final-benchmark](https://wandb.ai/amaan784-columbia-university/hpml-final-benchmark?nw=nwusermr4650)
 >
 > *Platform used:* Weights & Biases
 
@@ -274,7 +274,7 @@ Logging is implemented in [`benchmark/wandb_logger.py`](benchmark/wandb_logger.p
 
 ### C. Datasets
 
-The scenarios are hand authored and committed under [`src/scenarios/local/`](src/scenarios/local/). The image assets they reference are not all committed, only a representative subset that lets the harness smoke test without external downloads. Source, license, and size for each of the four datasets are summarized in §2 above.
+The scenarios are hand authored and committed under [`src/scenarios/local/`](src/scenarios/local/). The image assets they reference are not all committed, only a representative subset that lets the harness smoke test without external downloads. Source, license, and size for each of the four datasets are summarized in Section 2 above.
 
 The calibration corpus is generated programmatically.
 
@@ -287,7 +287,7 @@ python -c "from benchmark.calibration import SUBSTATION_TEXTS; print(len(SUBSTAT
 
 ### D. Quantization (replaces "Training")
 
-This project does no training. The optimization is post-training quantization plus serving tuning. **The recommended path is to let [`scripts/overnight.sh`](scripts/overnight.sh) Stage 1 build any missing checkpoints automatically (~25 min × N missing); see §E.** The four checkpoints it produces are `models/qwen2.5-vl-7b-awq-{domain,generic}` and `models/llama3-llava-next-8b-awq-{domain,generic}-real`.
+This project does no training. The optimization is post-training quantization plus serving tuning. **The recommended path is to let [`scripts/overnight.sh`](scripts/overnight.sh) Stage 1 build any missing checkpoints automatically (~25 min x N missing); see Section E.** The four checkpoints it produces are `models/qwen2.5-vl-7b-awq-{domain,generic}` and `models/llama3-llava-next-8b-awq-{domain,generic}-real`.
 
 If you prefer to run the quantization step by hand:
 
@@ -306,7 +306,7 @@ python scripts/verify_checkpoint.py models/qwen2.5-vl-7b-awq-domain
 
 ### E. Evaluation
 
-The recommended path is the one-command sweep via [`scripts/overnight.sh`](scripts/overnight.sh). It builds any missing AWQ checkpoints, runs all 10 variants end to end, scrapes vLLM Prometheus + nvidia-smi for HPML metrics, runs LLM-as-judge if `OPENAI_API_KEY` is set, generates plots, and uploads a W&B summary. Total wall clock is roughly 6–8 hours on a single L4.
+The recommended path is the one-command sweep via [`scripts/overnight.sh`](scripts/overnight.sh). It builds any missing AWQ checkpoints, runs all 10 variants end to end, scrapes vLLM Prometheus + nvidia-smi for HPML metrics, runs LLM-as-judge if `OPENAI_API_KEY` is set, generates plots, and uploads a W&B summary. Total wall clock is roughly 6-8 hours on a single L4.
 
 ```bash
 cd ~/HPML-AssetOpsBench
@@ -324,10 +324,10 @@ CLEAN_RESULTS=1 QUANTIZE_MISSING=1 QUANTIZE_LLAMA=1 \
 
 Useful flags:
 
-* `CLEAN_RESULTS=1` — wipe `results/` before the run (recommended for a clean sweep).
-* `QUANTIZE_MISSING=1` — Stage 1 builds any AWQ checkpoint that is not already on disk (~25 min each).
-* `QUANTIZE_LLAMA=1` — also build the Llama AWQ checkpoints (cross-family track).
-* `OPENAI_API_KEY=sk-...` — enables Stage 3 LLM-as-judge scoring; if unset, judge is skipped and only HPML metrics are produced.
+* `CLEAN_RESULTS=1` - wipe `results/` before the run (recommended for a clean sweep).
+* `QUANTIZE_MISSING=1` - Stage 1 builds any AWQ checkpoint that is not already on disk (~25 min each).
+* `QUANTIZE_LLAMA=1` - also build the Llama AWQ checkpoints (cross-family track).
+* `OPENAI_API_KEY=sk-...` - enables Stage 3 LLM-as-judge scoring; if unset, judge is skipped and only HPML metrics are produced.
 
 If you only want to rerun the benchmark/eval pass (checkpoints already on disk):
 
@@ -335,7 +335,7 @@ If you only want to rerun the benchmark/eval pass (checkpoints already on disk):
 CLEAN_RESULTS=1 QUANTIZE_MISSING=0 bash scripts/overnight.sh 2>&1 | tee results/overnight.log
 ```
 
-Manual fallback — run a single variant at a time:
+Manual fallback - run a single variant at a time:
 
 ```bash
 bash scripts/serve_and_bench.sh L0_baseline           # Qwen FP16
@@ -393,7 +393,7 @@ End-to-end on a fresh GCP L4 VM, the whole pipeline (10 variants, both families,
 bash scripts/setup_vm.sh
 bash scripts/setup_vm.sh ssh
 
-# 2. On the VM: install env per §A (uv sync + GPU pip install + wandb login + OPENAI_API_KEY)
+# 2. On the VM: install env per Section A (uv sync + GPU pip install + wandb login + OPENAI_API_KEY)
 #    Then kick off the full sweep inside tmux so SSH drops do not kill the run:
 cd ~/HPML-AssetOpsBench
 tmux new -s overnight
@@ -412,7 +412,7 @@ column -ts, results/hpml_metrics.csv
 ls results/plots
 ```
 
-If you only want the Qwen 3-variant headline (FP16, domain INT4, generic INT4) without the cross-family Llama track, run individual variants via `serve_and_bench.sh` as shown in §E.
+If you only want the Qwen 3-variant headline (FP16, domain INT4, generic INT4) without the cross-family Llama track, run individual variants via `serve_and_bench.sh` as shown in Section E.
 
 ---
 
@@ -450,7 +450,7 @@ We hit and fixed six distinct integration bugs across the modern quantization to
 |---|---|---|---|
 | 1 | llmcompressor 0.3.0 | save flow crashed on `_copy_python_files_from_model_cache` | upgrade to 0.10.0.2 (rewritten save path) |
 | 2 | llmcompressor 0.3.0 | "fake quant FP16" output (no actual packing) | use `save_compressed=True` (only in 0.10+) |
-| 3 | transformers 4.57 LlavaNext | `save_pretrained` `module_map[image_newline]` KeyError | `dispatch_model` + `remove_hook_from_module` + sed patch `if module_map: → if module_map and False:` |
+| 3 | transformers 4.57 LlavaNext | `save_pretrained` `module_map[image_newline]` KeyError | `dispatch_model` + `remove_hook_from_module` + sed patch `if module_map: -> if module_map and False:` |
 | 4 | accelerate >= 1.0 | `from accelerate.utils import remove_hook_from_module` ImportError | moved to `accelerate.hooks` |
 | 5 | vLLM 0.19 LlavaNext | `KeyError: 'qkv_proj.weight'` when ignore list expanded vision_tower q/k/v separately | use regex form `re:.*vision_tower.*` instead of expanded names |
 | 6 | mistral_common resolver drift | historical workaround pinned `mistral_common>=1.5,<1.7`; this conflicts with `vllm==0.19.0`, which requires `mistral-common[image]>=1.10.0` | do not pin `mistral_common`; let vLLM install its dependency |
@@ -494,11 +494,11 @@ The repository is forked from [IBM/AssetOpsBench](https://github.com/IBM/AssetOp
 
 **Tools used.** Claude (Anthropic) via Claude Code, ChatGPT, GitHub Copilot.
 
-**Specific purpose.** Debugging the llmcompressor, transformers, accelerate, and vLLM integration stack (the six bugs tabulated in §6 "Engineering bugs diagnosed and worked around"). Drafting the LLM as judge prompts. Polishing prose in this README and in the IEEE final report. Scaffolding the variant registry framework under `benchmark/variants/`.
+**Specific purpose.** Debugging the llmcompressor, transformers, accelerate, and vLLM integration stack (the six bugs tabulated in Section 6 "Engineering bugs diagnosed and worked around"). Drafting the LLM as judge prompts. Polishing prose in this README and in the IEEE final report. Scaffolding the variant registry framework under `benchmark/variants/`.
 
-**Sections affected.** `scripts/quantize_llmcompressor_v010.py` (debugging only), `benchmark/llm_judge.py` (prompt drafting), `benchmark/variants/base.py` (scaffold), README §6 results narrative, report §V Discussion.
+**Sections affected.** `scripts/quantize_llmcompressor_v010.py` (debugging only), `benchmark/llm_judge.py` (prompt drafting), `benchmark/variants/base.py` (scaffold), README Section 6 results narrative, report Section V Discussion.
 
-**How we verified correctness.** Every reported number in §3 was produced by re running the harness ourselves and is traceable to a CSV row under `results/`. Checkpoint formats were verified with `scripts/verify_checkpoint.py` against the `compressed-tensors` packed quantized spec. Profiler trace interpretations were checked against raw traces under `results/`. AI suggested code was reviewed line by line and re tested against the unit tests under `benchmark/tests/` before being merged.
+**How we verified correctness.** Every reported number in Section 3 was produced by re running the harness ourselves and is traceable to a CSV row under `results/`. Checkpoint formats were verified with `scripts/verify_checkpoint.py` against the `compressed-tensors` packed quantized spec. Profiler trace interpretations were checked against raw traces under `results/`. AI suggested code was reviewed line by line and re tested against the unit tests under `benchmark/tests/` before being merged.
 
 By submitting this project, the team confirms that the analysis, interpretations, and conclusions are our own, and that any AI assistance is fully disclosed above. The same disclosure block appears as an appendix in the final report.
 
@@ -528,4 +528,4 @@ Open a GitHub Issue or email the team (UNIs above @columbia.edu).
 
 ---
 
-*HPML Spring 2026 — Dr. Kaoutar El Maghraoui — Columbia University*
+*HPML Spring 2026 - Dr. Kaoutar El Maghraoui - Columbia University*
