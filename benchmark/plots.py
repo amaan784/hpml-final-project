@@ -223,11 +223,19 @@ def plot_pareto(out_path: Path, summary: list[dict]) -> bool:
     if not points:
         return False
 
-    fig, ax = plt.subplots(figsize=_figsize("double"))
+    fig, ax = plt.subplots(figsize=(7.16, 3.45))
     seen_families: set[str] = set()
     seen_model_families: set[str] = set()
 
-    label_offsets = [(7, 5), (7, -10), (-40, 5), (-40, -10)]
+    label_offsets = [(8, 8), (8, -13), (-42, 8), (-42, -13)]
+    manual_offsets = {
+        "L0": (-42, -16),
+        "L0-llama": (-54, 12),
+        "L2": (8, 10),
+        "L2-llama": (10, -18),
+        "L3-512": (8, 14),
+        "L3-512-llama": (8, -16),
+    }
     used_offsets: dict[tuple[float, float], int] = {}
 
     def _bucket(p):
@@ -249,7 +257,7 @@ def plot_pareto(out_path: Path, summary: list[dict]) -> bool:
         b = _bucket(p)
         idx = used_offsets.get(b, 0)
         used_offsets[b] = idx + 1
-        offset = label_offsets[idx % len(label_offsets)]
+        offset = manual_offsets.get(p["short"], label_offsets[idx % len(label_offsets)])
         ax.annotate(
             p["short"], (p["mean_e2e_ms"], p["accuracy"]),
             xytext=offset, textcoords="offset points", fontsize=7,
@@ -263,9 +271,14 @@ def plot_pareto(out_path: Path, summary: list[dict]) -> bool:
     ax.set_title("Latency-Accuracy Pareto across optimization variants")
     ax.grid(True, axis="both")
     accs = [p["accuracy"] for p in points]
-    ymin = max(0, min(accs) - 0.05)
+    ymin = -0.04 if min(accs) <= 0.02 else max(0, min(accs) - 0.05)
     ymax = min(1.02, max(accs) + 0.10)
     ax.set_ylim(ymin, ymax)
+    xs = [p["mean_e2e_ms"] for p in points]
+    if xs:
+        span = max(xs) - min(xs)
+        pad = max(350, span * 0.06)
+        ax.set_xlim(min(xs) - pad, max(xs) + pad)
 
     handles = []
     labels = []
@@ -282,7 +295,7 @@ def plot_pareto(out_path: Path, summary: list[dict]) -> bool:
         handles.append(plt.Line2D([], [], marker="s", linestyle="", color="white",
                                   markeredgecolor="black", markersize=6))
         labels.append("Llama")
-    ax.legend(handles, labels, loc="best", framealpha=0.9, frameon=True, ncol=2, fontsize=7)
+    ax.legend(handles, labels, loc="upper right", framealpha=0.9, frameon=True, ncol=2, fontsize=7)
     fig.tight_layout()
     fig.savefig(out_path)
     fig.savefig(out_path.with_suffix(".pdf"))
@@ -319,7 +332,7 @@ def plot_latency_box(out_path: Path, summary: list[dict]) -> bool:
     if not data:
         return False
 
-    fig, ax = plt.subplots(figsize=_figsize("double"))
+    fig, ax = plt.subplots(figsize=(7.16, 3.25))
     bp = ax.boxplot(
         data, tick_labels=labels, widths=0.55, showfliers=True, patch_artist=True,
         medianprops={"color": "black", "linewidth": 1.0},
@@ -408,10 +421,17 @@ def plot_vram_breakdown(out_path: Path, hpml: list[dict]) -> bool:
         total = w + k
         if total > 0:
             ax.text(xi, total + 0.3, f"{total:.1f}", ha="center", fontsize=7)
-    ax.legend(loc="upper right", framealpha=0.9, frameon=True)
+    ax.legend(
+        loc="upper center",
+        bbox_to_anchor=(0.5, 1.33),
+        ncol=2,
+        framealpha=0.9,
+        frameon=True,
+    )
     ymax = max((w + k) for w, k in zip(weight, kv)) if weight else 1
-    ax.set_ylim(0, ymax * 1.10)
+    ax.set_ylim(0, ymax * 1.18)
     fig.tight_layout()
+    fig.subplots_adjust(top=0.72)
     fig.savefig(out_path)
     fig.savefig(out_path.with_suffix(".pdf"))
     plt.close(fig)
@@ -445,10 +465,7 @@ def plot_ttft_itl(out_path: Path, hpml: list[dict]) -> bool:
     if not labels:
         return False
 
-    placeholder_hint = (
-        all(t in (1000.0, 2500.0) for t in (ttft50 + ttft95) if t > 0)
-        and all(itl == 0 for itl in itl50)
-    )
+    itl_unavailable = all(itl == 0 for itl in itl50)
 
     fig, ax_ttft = plt.subplots(figsize=_figsize("double"))
     x = list(range(len(labels)))
@@ -462,25 +479,25 @@ def plot_ttft_itl(out_path: Path, hpml: list[dict]) -> bool:
     ax_ttft.set_ylabel("TTFT (ms)")
     ax_ttft.set_title("Time-to-first-token and inter-token latency")
     ax_ttft.grid(True, axis="y")
-    ax_itl = ax_ttft.twinx()
-    ax_itl.spines["top"].set_visible(False)
-    ax_itl.plot(x, itl50, marker="o", color=_PALETTE[2], label="ITL p50 (ms/tok)", linewidth=1.2)
-    ax_itl.set_ylabel("ITL (ms/token)")
     h1, l1 = ax_ttft.get_legend_handles_labels()
-    h2, l2 = ax_itl.get_legend_handles_labels()
-    ax_ttft.legend(h1 + h2, l1 + l2, loc="upper right", framealpha=0.9, frameon=True)
-
-    # runs when placeholder_hint
-    if placeholder_hint:
-        ax_ttft.text(
-            0.5, 1.10,
-            "vLLM histogram empty during measurement window - bars are bucket "
-            "boundaries, not real percentiles. Re-collect with active traffic.",
-            transform=ax_ttft.transAxes, ha="center", va="bottom",
+    if itl_unavailable:
+        ax_ttft.legend(h1, l1, loc="upper right", framealpha=0.9, frameon=True)
+        fig.text(
+            0.5, 0.02,
+            "ITL unavailable: vLLM histogram was empty during the metric scrape.",
+            ha="center", va="bottom",
             fontsize=7, color="darkred",
             bbox={"boxstyle": "round,pad=0.3", "facecolor": "white", "edgecolor": "darkred"},
         )
-    fig.tight_layout()
+    else:
+        ax_itl = ax_ttft.twinx()
+        ax_itl.spines["top"].set_visible(False)
+        ax_itl.plot(x, itl50, marker="o", color=_PALETTE[2], label="ITL p50 (ms/tok)", linewidth=1.2)
+        ax_itl.set_ylabel("ITL (ms/token)")
+        h2, l2 = ax_itl.get_legend_handles_labels()
+        ax_ttft.legend(h1 + h2, l1 + l2, loc="upper right", framealpha=0.9, frameon=True)
+
+    fig.tight_layout(rect=(0, 0.08, 1, 1) if itl_unavailable else (0, 0, 1, 1))
     fig.savefig(out_path)
     fig.savefig(out_path.with_suffix(".pdf"))
     plt.close(fig)
@@ -704,16 +721,32 @@ def plot_family_compare(out_path: Path, summary: list[dict]) -> bool:
                for name, _, _ in avail):
         return False
 
-    fig, ax = plt.subplots(figsize=_figsize("double"))
+    fig, ax = plt.subplots(figsize=(7.16, 3.25))
     colors = [_PALETTE[0] if f == "qwen" else _PALETTE[3] for f in families]
     ax.scatter(mean_e2e, accuracy, s=80, color=colors, edgecolor="black", linewidth=0.7, zorder=3)
     for xi, yi, lab in zip(mean_e2e, accuracy, labels):
-        ax.annotate(lab, (xi, yi), xytext=(7, 5), textcoords="offset points", fontsize=8)
+        offsets = {
+            "Qwen FP16": (12, 10),
+            "Llama FP16": (-72, 10),
+            "Qwen INT4 domain": (12, 10),
+            "Llama INT4 domain": (14, 8),
+        }
+        offset = offsets.get(lab, (8, 6))
+        ax.annotate(
+            lab, (xi, yi), xytext=offset, textcoords="offset points", fontsize=8,
+            arrowprops={
+                "arrowstyle": "-", "color": "gray", "lw": 0.4, "alpha": 0.6,
+            } if offset[0] < 0 else None,
+        )
     ax.set_xlabel("Mean end-to-end latency (ms)")
     ax.set_ylabel("LLM-judge accuracy (score >= 4)")
     ax.set_title("Cross-family comparison: Qwen vs Llama (FP16 vs AWQ INT4)")
     ax.grid(True, axis="both")
     ax.set_ylim(-0.02, max(accuracy) + 0.1 if accuracy else 1.0)
+    if mean_e2e:
+        span = max(mean_e2e) - min(mean_e2e)
+        pad = max(350, span * 0.08)
+        ax.set_xlim(min(mean_e2e) - pad, max(mean_e2e) + pad)
     handles = [
         mpatches.Patch(color=_PALETTE[0], label="Qwen2.5-VL-7B"),
         mpatches.Patch(color=_PALETTE[3], label="Llama-3-LLaVA-NeXT-8B"),
