@@ -1,0 +1,14 @@
+Sweep finished: Sun May 10 05:17:46 UTC 2026
+
+VARIANT                           STATUS
+-------                           ------
+L0_baseline                       PASS
+L1_awq_w4a16_domain               PASS
+L1_awq_w4a16_generic              PASS
+L2_full_bundle                    FAIL
+L3_image_512                      PASS
+L0_llama_baseline                 PASS
+L1_llama_awq_w4a16_domain         PASS
+L1_llama_awq_w4a16_generic        PASS
+L2_llama_full_bundle              FAIL
+L3_llama_image_512                PASS
