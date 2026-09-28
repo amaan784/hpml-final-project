@@ -9,6 +9,12 @@
 #       bash scripts/serve_vllm.sh   # L2 tuning
 #
 # Run inside tmux/nohup so the IAP tunnel can drop without killing vLLM.
+#
+# Reproducible latency: set LOCK_GPU_CLOCK=<MHz> (e.g. 1410 for L4 base) to
+# pin the GPU's SM clock for the lifetime of the server. The script unlocks
+# on exit. Without this, thermal/scheduler jitter makes single-shot e2e_ms
+# swing by 5-15% between runs even on identical inputs. Requires sudo.
+#   LOCK_GPU_CLOCK=1410 bash scripts/serve_vllm.sh
 set -euo pipefail
 
 MODEL="${MODEL:-Qwen/Qwen2.5-VL-7B-Instruct}"
@@ -16,6 +22,16 @@ PORT="${PORT:-8000}"
 GPU_UTIL="${GPU_UTIL:-0.85}"
 MAX_LEN="${MAX_LEN:-8192}"
 EXTRA="${EXTRA:-}"
+LOCK_GPU_CLOCK="${LOCK_GPU_CLOCK:-}"
+
+if [ -n "$LOCK_GPU_CLOCK" ]; then
+    echo "==> Locking GPU SM clock to ${LOCK_GPU_CLOCK} MHz (sudo nvidia-smi -lgc)"
+    if sudo nvidia-smi -lgc "$LOCK_GPU_CLOCK" -i 0; then
+        trap 'echo "==> Restoring default GPU clocks"; sudo nvidia-smi -rgc -i 0 || true' EXIT
+    else
+        echo "WARN: failed to lock GPU clock; continuing with default clocks"
+    fi
+fi
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ASSETOPSBENCH_DIR="${ASSETOPSBENCH_DIR:-$REPO}"
 ASSETOPSBENCH_DIR="${ASSETOPSBENCH_DIR/#\~/$HOME}"
