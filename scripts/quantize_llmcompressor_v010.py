@@ -17,7 +17,19 @@ ap.add_argument("--out-dir", required=True)
 ap.add_argument("--model-id", default="llava-hf/llama3-llava-next-8b-hf")
 ap.add_argument("--num-samples", type=int, default=128)
 ap.add_argument("--max-seq-len", type=int, default=2048)
+ap.add_argument("--seed", type=int, default=42,
+                help="Seed for random/numpy/torch/cudnn (see benchmark/seeding.py).")
 args = ap.parse_args()
+
+# Seed BEFORE any torch / llmcompressor import: cudnn.benchmark must be
+# set before the first cuDNN-backed op, and GPTQ's Hessian solve is
+# otherwise unseeded (re-quantizing the same model -> different INT4
+# weights -> different latency + accuracy).
+_REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_REPO))
+from benchmark.seeding import set_all_seeds  # noqa: E402
+set_all_seeds(args.seed)
+print(f"==> seeded random/numpy/torch/cudnn with seed={args.seed}")
 
 
 def _ensure_transformers_save_pretrained_patch() -> None:
@@ -227,9 +239,7 @@ os.environ["WANDB_DISABLED"] = "false"
 os.environ["WANDB_MODE"] = "online"
 # isolate errors so the rest of the call can bail cleanly
 try:
-    import sys as _sys
-    _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    _sys.path.insert(0, _REPO)
+    # sys.path was already extended near the top (for benchmark.seeding).
     from benchmark.wandb_logger import log_checkpoint_artifact
     artifact_url = log_checkpoint_artifact(
         name=os.path.basename(args.out_dir),

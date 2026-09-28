@@ -47,6 +47,7 @@ sys.path.insert(0, str(_REPO))
 from servers.vision import image_loader, vlm_client, main as vision_main  # noqa: E402
 from benchmark import variants as variant_registry  # noqa: E402
 from benchmark.wandb_logger import log_variant_run  # noqa: E402
+from benchmark.csv_utils import ensure_csv_schema  # noqa: E402
 
 SCENARIOS_DIR = _REPO / "src" / "scenarios" / "local"
 RESULTS_DIR = _REPO / "results"
@@ -72,12 +73,26 @@ def _default_scenario_paths() -> list[Path]:
 # ``python -m benchmark.llm_judge``).
 
 
-async def _run_scenario(scenario: dict) -> dict:
+def _percentile(sorted_vals: list[float], q: float) -> float:
+    # Nearest-rank percentile; sorted_vals must be sorted ascending.
+    if not sorted_vals:
+        return 0.0
+    if len(sorted_vals) == 1:
+        return sorted_vals[0]
+    rank = max(0, min(len(sorted_vals) - 1, int(round(q * (len(sorted_vals) - 1)))))
+    return sorted_vals[rank]
+
+
+async def _run_scenario(scenario: dict, repeats: int, warmup: int) -> dict:
     """Run one scenario directly through the vision MCP tool functions.
 
     We skip the planner LLM because each scenario already names the tool to
     invoke (``expected_tool``). This keeps measured latency to the VLM call
     itself and removes orchestrator noise from the benchmark.
+
+    Each scenario is timed ``repeats`` times after ``warmup`` discarded calls;
+    ``e2e_ms`` is the median, ``e2e_ms_iqr`` is P75 - P25 (single-shot mode is
+    ``repeats=1 warmup=0`` and the IQR collapses to 0).
 
     Returns the per-scenario row WITHOUT a ``correct`` field -- accuracy
     grading happens post-hoc via ``benchmark/llm_judge.py`` against the
@@ -88,9 +103,22 @@ async def _run_scenario(scenario: dict) -> dict:
     # Allow teammates to pass per-scenario tool args (e.g. 'question' for analyze_image).
     args.update(scenario.get("tool_args_extra", {}))
 
-    t0 = time.perf_counter()
-    contents, _ = await vision_main.mcp.call_tool(tool_name, args)
-    dt_ms = (time.perf_counter() - t0) * 1000
+    # Discard warm-up timings (first call after model swap or cache flush is
+    # ~2x slower on the L4; otherwise it pollutes the median).
+    for _ in range(max(0, warmup)):
+        await vision_main.mcp.call_tool(tool_name, args)
+
+    samples_ms: list[float] = []
+    contents = None
+    for _ in range(max(1, repeats)):
+        t0 = time.perf_counter()
+        contents, _ = await vision_main.mcp.call_tool(tool_name, args)
+        samples_ms.append((time.perf_counter() - t0) * 1000)
+
+    samples_sorted = sorted(samples_ms)
+    median_ms = _percentile(samples_sorted, 0.5)
+    p25 = _percentile(samples_sorted, 0.25)
+    p75 = _percentile(samples_sorted, 0.75)
 
     payload = json.loads(contents[0].text)
     # Different vision tools name the response field differently:
@@ -106,19 +134,23 @@ async def _run_scenario(scenario: dict) -> dict:
         "category": scenario["category"],
         "characteristic_form": scenario["characteristic_form"],
         "tool": tool_name,
-        "e2e_ms": round(dt_ms, 2),
+        "e2e_ms": round(median_ms, 2),
+        "e2e_ms_iqr": round(p75 - p25, 2),
+        "e2e_ms_min": round(samples_sorted[0], 2),
+        "e2e_ms_max": round(samples_sorted[-1], 2),
+        "e2e_ms_repeats": len(samples_sorted),
         "error": payload.get("error", ""),
         "raw_response": response_text[:1500],
     }
 
 
-async def _run_all(scenarios: list[dict]) -> list[dict]:
+async def _run_all(scenarios: list[dict], repeats: int, warmup: int) -> list[dict]:
     # Run scenarios serially so stdout + exception traces stay human-readable.
     rows = []
     for sc in scenarios:
         print(f"  -> #{sc['id']} {sc['category']}", flush=True)
         try:
-            row = await _run_scenario(sc)
+            row = await _run_scenario(sc, repeats=repeats, warmup=warmup)
         except Exception as exc:  # noqa: BLE001
             row = {
                 "scenario_id": sc["id"],
@@ -126,6 +158,10 @@ async def _run_all(scenarios: list[dict]) -> list[dict]:
                 "characteristic_form": sc["characteristic_form"],
                 "tool": sc["expected_tool"],
                 "e2e_ms": -1,
+                "e2e_ms_iqr": 0,
+                "e2e_ms_min": -1,
+                "e2e_ms_max": -1,
+                "e2e_ms_repeats": 0,
                 "error": f"runner_exception: {exc}",
                 "raw_response": "",
             }
@@ -173,7 +209,13 @@ def _scrape_vllm_metrics(base_url: str) -> dict[str, Any]:
 # CSV + WandB sinks
 CSV_FIELDS = [
     "variant", "scenario_id", "category",
-    "tool", "e2e_ms", "error",
+    "tool",
+    "e2e_ms",            # median across --repeats (single-shot when repeats=1)
+    "e2e_ms_iqr",        # P75 - P25 across repeats (0.0 when repeats=1)
+    "e2e_ms_min",
+    "e2e_ms_max",
+    "e2e_ms_repeats",
+    "error",
     "raw_response",
     # `correct` (auto-scorer output) was removed 2026-05-07 -- accuracy now
     # comes from results/llm_judge.csv (post-hoc, via benchmark/llm_judge.py).
@@ -186,6 +228,10 @@ CSV_FIELDS = [
 def _append_csv(rows: list[dict], variant: str) -> None:
     # Append-only CSV so teammates can compare repeated bench runs locally.
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    # Migrate a legacy-schema summary.csv (pre e2e_ms_iqr columns) in place;
+    # appending new-order rows under the old header would misalign columns
+    # (e2e_ms_iqr under `error`, e2e_ms_min under `raw_response`).
+    ensure_csv_schema(SUMMARY_CSV, CSV_FIELDS)
     new_file = not SUMMARY_CSV.exists()
     with SUMMARY_CSV.open("a", newline="") as fh:
         w = csv.DictWriter(fh, fieldnames=CSV_FIELDS)
@@ -212,7 +258,24 @@ def main() -> int:
     parser.add_argument("--scenarios", action="append",
                         help="Scenario JSON file. Pass multiple --scenarios to "
                              "run teammate sets together (defaults to vision_utterance.json).")
+    parser.add_argument("--repeats", type=int, default=5,
+                        help=("Timed runs per scenario; e2e_ms is the median. "
+                              "Default 5; pass 1 for the legacy single-shot mode."))
+    parser.add_argument("--warmup", type=int, default=1,
+                        help=("Discarded calls per scenario before timing starts "
+                              "(default 1). Bypasses the first-call cold path."))
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Seed for random/numpy/torch/cudnn (see benchmark/seeding.py).")
     args = parser.parse_args()
+
+    # Seed BEFORE the harness touches torch / vLLM client state. The vLLM
+    # server itself runs in a separate process (serve_and_bench.sh /
+    # serve_vllm.sh); its main run-to-run noise source is GPU clock boost,
+    # addressed there via LOCK_GPU_CLOCK, and generation is greedy
+    # (temperature=0.0 in vlm_client.py) so no server-side sampling seed
+    # is needed.
+    from benchmark.seeding import set_all_seeds
+    set_all_seeds(args.seed)
 
     # Resolve the variant from the registry. Exports VLM_MODEL +
     # VLM_IMAGE_MAX_SIDE so vlm_client honors the variant's settings even
@@ -248,9 +311,10 @@ def main() -> int:
     print(f"==> VLM_BASE_URL: {os.environ.get('VLM_BASE_URL', vlm_client.DEFAULT_BASE_URL)}")
     print(f"==> VLM_MODEL:    {os.environ['VLM_MODEL']}")
     print(f"==> image_max:    {variant.image_max_side}")
-    print(f"==> Scenarios:    {len(scenarios)}")
+    print(f"==> Scenarios:    {len(scenarios)}  "
+          f"(seed={args.seed}, repeats={args.repeats}, warmup={args.warmup})")
 
-    rows = asyncio.run(_run_all(scenarios))
+    rows = asyncio.run(_run_all(scenarios, repeats=args.repeats, warmup=args.warmup))
     metrics = _scrape_vllm_metrics(
         os.environ.get("VLM_BASE_URL", vlm_client.DEFAULT_BASE_URL)
     )

@@ -363,7 +363,12 @@ def plot_latency_box(out_path: Path, summary: list[dict]) -> bool:
 
 
 # Plot 3: VRAM breakdown
-WEIGHT_GIB = {
+#
+# Historical hand-transcribed weight footprints (from vLLM startup logs of the
+# May 2026 runs). Used ONLY as a fallback when results/vram_breakdown.csv has
+# no measured row for a variant -- measured values always win. The CSV is
+# populated automatically by scripts/vram_evidence.py during the sweep.
+WEIGHT_GIB_FALLBACK = {
     "L0_baseline":                       15.0,
     "L0_llama_baseline":                 15.5,
     "L1_awq_w4a16_domain":               5.9,
@@ -375,6 +380,21 @@ WEIGHT_GIB = {
     "L3_image_512":                      15.0,
     "L3_llama_image_512":                15.5,
 }
+
+
+def _measured_weights_gib() -> dict[str, float]:
+    """variant -> weights_gib from results/vram_breakdown.csv (last row wins)."""
+    path = RESULTS / "vram_breakdown.csv"
+    if not path.exists():
+        return {}
+    out: dict[str, float] = {}
+    with path.open(encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            v = row.get("variant")
+            w = _to_float(row.get("weights_gib"), 0)
+            if v and w and w > 0:
+                out[v] = w
+    return out
 
 
 def plot_vram_breakdown(out_path: Path, hpml: list[dict]) -> bool:
@@ -390,6 +410,7 @@ def plot_vram_breakdown(out_path: Path, hpml: list[dict]) -> bool:
     for r in hpml:
         latest_per_variant[r.get("variant", "?")] = r
 
+    measured = _measured_weights_gib()
     ordered = sorted(latest_per_variant.items(), key=lambda x: (_variant_metadata(x[0])["family"], x[0]))
     labels, weight, kv = [], [], []
     # process records in deterministic order
@@ -399,10 +420,13 @@ def plot_vram_breakdown(out_path: Path, hpml: list[dict]) -> bool:
         # runs when used <= 0
         if used <= 0:
             continue
-        w = WEIGHT_GIB.get(name, 0)
+        # Measured (vram_breakdown.csv) beats the historical fallback. With
+        # neither, plot the whole bar as unattributed rather than inventing
+        # a split -- a fabricated ratio would misrepresent the evidence.
+        w = measured.get(name) or WEIGHT_GIB_FALLBACK.get(name, 0)
         labels.append(_variant_metadata(name)["short"])
-        weight.append(w)
-        kv.append(max(0, used - w) if w > 0 else used * 0.15)
+        weight.append(w if w > 0 else 0)
+        kv.append(max(0, used - w) if w > 0 else used)
 
     # skip whenever labels is missing/false
     if not labels:

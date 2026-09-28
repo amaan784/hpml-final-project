@@ -305,6 +305,8 @@ def main() -> int:
     )
     p.add_argument("--num-samples", type=int, default=128)
     p.add_argument("--max-seq-len", type=int, default=2048)
+    p.add_argument("--seed", type=int, default=42,
+                   help="Seed for random/numpy/torch/cudnn (see benchmark/seeding.py).")
     p.add_argument(
         "--pipeline",
         choices=["sequential", "basic"],
@@ -322,6 +324,14 @@ def main() -> int:
         ),
     )
     args = p.parse_args()
+
+    # Seed BEFORE any torch / llmcompressor import: cudnn.benchmark must be
+    # set before the first cuDNN-backed op, and GPTQ's Hessian solve is
+    # otherwise unseeded (re-quantizing the same model -> different INT4
+    # weights -> different latency + accuracy).
+    from benchmark.seeding import set_all_seeds
+    set_all_seeds(args.seed)
+    print(f"==> seeded random/numpy/torch/cudnn with seed={args.seed}")
 
     _ensure_transformers_save_pretrained_patch()
 

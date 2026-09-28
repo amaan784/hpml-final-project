@@ -38,7 +38,7 @@ The final report PDF and the presentation file are checked into the `deliverable
 
 AssetOpsBench (AAAI 2026) covers 141 industrial AI scenarios across text and time series modalities, but it has no vision component. That gap matters in practice because many failure modes (corrosion, ice buildup, bearing damage, casting defects, transformer hot spots) are visible long before sensor data flags them. The natural way to close the gap is to bring a vision language model into the AssetOpsBench agent loop, but doing that on commodity hardware is expensive. At FP16, Llama 3 LLaVA NeXT 8B occupies 15.5 GiB of weight VRAM and produces a 9.3 second per query mean latency on a single NVIDIA L4, which leaves almost no key value cache headroom for batched multi agent workloads.
 
-A naive INT4 quantization (using a generic calibration corpus) appears faster on average, but it also surfaces a runaway generation failure mode: in the final 22-scenario sweep, two Llama L1g transformer scenarios timed out at the token cap at around 122 seconds (dropping its judged denominator from 44 to 40). That kind of tail behavior is unacceptable for industrial deployment.
+A naive INT4 quantization (using a generic calibration corpus) appears faster on average, but it also surfaces a runaway generation failure mode: in the final 22-scenario sweep, two Llama L1g transformer scenarios timed out at the token cap at around 122 seconds, so they were excluded from its judged scenario count (20 scoreable scenarios instead of 22). That kind of tail behavior is unacceptable for industrial deployment.
 
 This project targets inference side optimization. We add a vision modality to AssetOpsBench through a VLM powered MCP agent, then we make it cheap and reliable on a single NVIDIA L4 GPU through quantization, calibration regime selection, vLLM serving tuning, and image preprocessing changes.
 
@@ -79,7 +79,7 @@ The calibration corpus in [`benchmark/calibration.py`](benchmark/calibration.py)
 
 ## 3. Final Results Summary
 
-The headline numbers come from the final 22-scenario sweep covering all four asset classes (5 pump + 6 transformer + 5 turbine + 6 motor), across 10 optimization variants. Each scenario is judged twice by `gpt-4o-mini` (pass when score ≥ 4), giving a maximum denominator of 44 per variant. Raw per-variant data is in [`results/hpml_metrics.csv`](results/hpml_metrics.csv); per-scenario judge scores are in [`results/llm_judge.csv`](results/llm_judge.csv).
+The headline numbers come from the final 22-scenario sweep covering all four asset classes (5 pump + 6 transformer + 5 turbine + 6 motor), across 10 optimization variants. Each scenario is judged N times by `gpt-4o-mini-2024-07-18` with a fixed `seed=42` (pass when score ≥ 4); the canonical accuracy is the mean ± std across passes (see [`benchmark/llm_judge.py`](benchmark/llm_judge.py) `--passes`). Raw per-variant latency / VRAM lives in [`results/hpml_metrics.csv`](results/hpml_metrics.csv); per-pass judge scores (one row per `(variant, scenario_id, pass_idx)`) live in [`results/llm_judge.csv`](results/llm_judge.csv); every number quoted below and in the report / slides is reproduced by `python scripts/report_numbers.py`.
 
 ### 3.1 Qwen2.5 VL 7B, primary track
 
@@ -97,7 +97,7 @@ The headline numbers come from the final 22-scenario sweep covering all four ass
 | p50 end to end latency | 9,384 ms | 3,136 ms | 2.99x faster |
 | LLM as judge accuracy | 52.3% (23/44) | 40.0% (16/40) | 12.3 pp lower |
 
-For the Llama track, the L1d (domain) variant gives 2.46x mean speedup at 59.1% accuracy (26/44). The Llama family also shows a 2.6x weight VRAM reduction (15.54 GiB to 5.9 GiB) and a 4.7x growth in the key value cache pool (21K to 100K concurrent tokens), confirmed from vLLM's `gpu_model_runner` startup logs. The L1g denominator is 40 (not 44) due to a logging gap on two transformer scenarios.
+For the Llama track, the L1d (domain) variant gives 2.46x mean speedup at 59.1% accuracy (26/44). The Llama family also shows a 2.6x weight VRAM reduction (15.54 GiB to 5.9 GiB) and a 4.7x growth in the key value cache pool (21K to 100K concurrent tokens), sourced from vLLM's `gpu_model_runner` startup logs — parsed into the committed evidence file [`results/vram_breakdown.csv`](results/vram_breakdown.csv) by [`scripts/vram_evidence.py`](scripts/vram_evidence.py) (run automatically during each sweep; `python scripts/vram_evidence.py report` prints the ratios). The L1g scoreable scenario count is 20 (not 22) because two transformer scenarios hit the token cap and produced no response to judge.
 
 **Hardware.** One NVIDIA L4 24 GB on GCP `g2-standard-8`, CUDA 12.9, vLLM 0.19, PyTorch, Ubuntu 22.04.
 
@@ -301,7 +301,14 @@ python scripts/quantize_llmcompressor_v010.py --mode generic --out-dir models/ll
 
 # Verify each checkpoint is in compressed-tensors packed quantized format (not silently saved as fake quant FP16):
 python scripts/verify_checkpoint.py models/qwen2.5-vl-7b-awq-domain
+
+# Pin the checkpoint by SHA256 so a later re-run can detect silent drift.
+# Write the manifest right after a quant run; verify before each bench.
+python scripts/hash_checkpoint.py write  models/qwen2.5-vl-7b-awq-domain
+python scripts/hash_checkpoint.py verify models/qwen2.5-vl-7b-awq-domain
 ```
+
+All quant scripts now set `random` / `numpy` / `torch` / `cudnn` seeds via [`benchmark/seeding.py`](benchmark/seeding.py) (default `--seed 42`) before any GPU op. On the same GPU and library versions this makes re-quantization reproducible in practice; the SHA256 manifest is the ground truth — run `hash_checkpoint.py verify` after any re-quantization, and if hashes differ despite identical seeds (GPU atomics in the GPTQ Hessian solve are not formally guaranteed bitwise-stable), treat the originally hashed checkpoint as the canonical artifact.
 
 ### E. Evaluation
 
@@ -348,9 +355,16 @@ bash scripts/serve_and_bench.sh L2_llama_full_bundle
 bash scripts/serve_and_bench.sh L3_image_512
 bash scripts/serve_and_bench.sh L3_llama_image_512
 
-# LLM-as-judge (separate, optional)
+# LLM-as-judge (separate, optional). Default is 3 passes with seed=42 against
+# the pinned snapshot gpt-4o-mini-2024-07-18; results carry per-pass rows so
+# the canonical accuracy is mean +/- std (see benchmark/llm_judge.py header).
 export OPENAI_API_KEY=sk-...
-python -m benchmark.llm_judge        # writes results/llm_judge.csv
+python -m benchmark.llm_judge                       # 3-pass sweep (~$0.09)
+python -m benchmark.llm_judge --passes 1            # legacy single-pass mode
+python -m benchmark.llm_judge --passes 5 --force    # rerun with more passes
+
+# Cross-check every number quoted in README/report/slides against results/.
+python scripts/report_numbers.py                    # sections: readme, report, slides
 
 # W&B summary
 python -m benchmark.wandb_summary
@@ -423,7 +437,7 @@ If you only want the Qwen 3-variant headline (FP16, domain INT4, generic INT4) w
 
 **AWQ W4A16 is a reliable speedup mechanism on both families.** Qwen domain achieves 1.99x and Llama generic achieves 2.92x mean speedup; Llama domain achieves 2.46x. The latency win is real on every variant; accuracy depends on the calibration regime.
 
-**Real INT4 packing was confirmed end to end.** 16 GB of FP16 weights compress to roughly 6.0 GB on disk in `compressed-tensors` packed quantized format, a 2.7x reduction. Runtime weight VRAM drops from 15.54 GiB to 5.9 GiB on the Llama family, confirmed in vLLM's `gpu_model_runner` startup logs. The freed 9.6 GiB is reabsorbed by the key value cache pool, which grows from 21K to 100K concurrent tokens (4.7x).
+**Real INT4 packing was confirmed end to end.** 16 GB of FP16 weights compress to roughly 6.0 GB on disk in `compressed-tensors` packed quantized format, a 2.7x reduction. Runtime weight VRAM drops from 15.54 GiB to 5.9 GiB on the Llama family, recorded from vLLM's `gpu_model_runner` startup logs into [`results/vram_breakdown.csv`](results/vram_breakdown.csv) via [`scripts/vram_evidence.py`](scripts/vram_evidence.py). The freed 9.6 GiB is reabsorbed by the key value cache pool, which grows from 21K to 100K concurrent tokens (4.7x).
 
 **Dual purpose VLM serving on a single L4** (planner role and vision tool role on the same model) eliminated the WatsonX API dependency entirely.
 

@@ -23,6 +23,10 @@
 #   GPU_UTIL           default 0.85
 #   MAX_MODEL_LEN      default 4096
 #   KILL_ORPHAN_VLLM   default 1. kill stale vLLM API servers owned by you
+#   LOCK_GPU_CLOCK     unset by default. Set to an SM clock in MHz (e.g. 1410
+#                      for the L4) to pin the GPU clock for the lifetime of
+#                      this variant's serve+bench, removing thermal/boost
+#                      jitter from e2e_ms. Unlocked again on exit. Needs sudo.
 
 set -euo pipefail
 
@@ -38,6 +42,7 @@ VLLM_PORT="${VLLM_PORT:-8000}"
 GPU_UTIL="${GPU_UTIL:-0.85}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
 KILL_ORPHAN_VLLM="${KILL_ORPHAN_VLLM:-1}"
+LOCK_GPU_CLOCK="${LOCK_GPU_CLOCK:-}"
 
 ASSETOPSBENCH_DIR="${ASSETOPSBENCH_DIR/#\~/$HOME}"
 if [ ! -f "$ASSETOPSBENCH_DIR/benchmark/run_vlm_benchmark.py" ]; then
@@ -68,10 +73,17 @@ if ! command -v tmux >/dev/null 2>&1; then
     exit 1
 fi
 
+GPU_CLOCK_LOCKED=0
+
 stop_vllm() {
     tmux kill-session -t vllm 2>/dev/null || true
     if [ "$KILL_ORPHAN_VLLM" = "1" ]; then
         pkill -u "$(id -u)" -f "vllm.entrypoints.openai.api_server" 2>/dev/null || true
+    fi
+    if [ "$GPU_CLOCK_LOCKED" = "1" ]; then
+        echo "==> Restoring default GPU clocks"
+        sudo nvidia-smi -rgc -i 0 >/dev/null 2>&1 || true
+        GPU_CLOCK_LOCKED=0
     fi
 }
 
@@ -108,6 +120,16 @@ echo "==================================================================="
 echo "==> Stopping any existing local vLLM tmux session"
 stop_vllm
 sleep 2
+
+if [ -n "$LOCK_GPU_CLOCK" ]; then
+    echo "==> Locking GPU SM clock to ${LOCK_GPU_CLOCK} MHz (sudo nvidia-smi -lgc)"
+    if sudo nvidia-smi -lgc "$LOCK_GPU_CLOCK" -i 0 >/dev/null 2>&1; then
+        GPU_CLOCK_LOCKED=1
+    else
+        echo "    WARN: failed to lock GPU clock; continuing with default clocks"
+    fi
+fi
+
 mkdir -p "$(dirname "$VLLM_LOG")"
 : > "$VLLM_LOG"
 
@@ -169,6 +191,14 @@ if ! "$PYTHON_BIN" benchmark/hpml_metrics.py --variant "$VARIANT" \
     echo "    [error] HPML metrics failed for $VARIANT"
     STATUS=1
 fi
+
+# Harvest the weight/KV-cache VRAM breakdown from the serve log NOW, while it
+# still exists (clean_results.py wipes vllm_serve_logs/). Appends committed
+# evidence rows to results/vram_breakdown.csv. Best-effort: a parse failure
+# does not fail the variant.
+echo "==> Extracting VRAM evidence from serve log ..."
+"$PYTHON_BIN" scripts/vram_evidence.py parse "$VLLM_LOG" --variant "$VARIANT" \
+    || echo "    [warn] VRAM evidence extraction failed for $VARIANT (non-fatal)"
 
 echo "==> Stopping vLLM"
 stop_vllm

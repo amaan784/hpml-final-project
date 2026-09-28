@@ -12,6 +12,13 @@ from typing import Iterable
 
 import requests
 
+try:
+    from benchmark.csv_utils import ensure_csv_schema
+except ImportError:  # direct-script invocation: python benchmark/hpml_metrics.py
+    import sys as _sys
+    _sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from benchmark.csv_utils import ensure_csv_schema
+
 REPO = Path(__file__).resolve().parent.parent
 RESULTS = REPO / "results"
 SUMMARY_CSV = RESULTS / "summary.csv"
@@ -107,12 +114,23 @@ def _summary_for_variant(variant: str) -> dict[str, float]:
     if not rows:
         return {}
     e2e = [float(r["e2e_ms"]) for r in rows if r.get("e2e_ms") and float(r["e2e_ms"]) > 0]
+    # Error rows carry e2e_ms_iqr=0 / e2e_ms_repeats=0; exclude them so they
+    # don't drag the IQR median down or pin e2e_repeats_min at 0.
+    ok_rows = [r for r in rows if r.get("e2e_ms") and float(r["e2e_ms"]) > 0]
+    iqrs = [float(r["e2e_ms_iqr"]) for r in ok_rows
+            if r.get("e2e_ms_iqr") not in (None, "")]
+    repeats_vals = [int(r["e2e_ms_repeats"]) for r in ok_rows
+                    if r.get("e2e_ms_repeats") not in (None, "") and int(r["e2e_ms_repeats"]) > 0]
     return {
         "n_scenarios": len(rows),
         "n_e2e_valid": len(e2e),
         "e2e_p50_ms": sorted(e2e)[len(e2e) // 2] if e2e else 0.0,
         "e2e_mean_ms": sum(e2e) / len(e2e) if e2e else 0.0,
         "e2e_max_ms": max(e2e) if e2e else 0.0,
+        # Median of per-scenario IQRs: typical within-scenario timing noise.
+        # 0.0 here means the harness was run in single-shot mode (--repeats 1).
+        "e2e_iqr_med_ms": sorted(iqrs)[len(iqrs) // 2] if iqrs else 0.0,
+        "e2e_repeats_min": min(repeats_vals) if repeats_vals else 0,
     }
 
 
@@ -131,6 +149,7 @@ HPML_FIELDS = [
     "gpu_cache_usage_pct",
     # E2E aggregate (from summary.csv)
     "n_scenarios", "n_e2e_valid", "e2e_mean_ms", "e2e_p50_ms", "e2e_max_ms",
+    "e2e_iqr_med_ms", "e2e_repeats_min",
     # NOTE: ``accuracy`` removed 2026-05-07 -- comes from llm_judge.csv now.
 ]
 
@@ -202,10 +221,13 @@ def main() -> int:
     print(f"  Throughput                {row['throughput_tok_per_s']:.1f} tok/s   (delta over {args.measurement_window_s:.0f}s)")
     print(f"  KV cache usage            {row['gpu_cache_usage_pct']:.1f}%")
     print(f"  E2E   (mean / p50 / max)  {row.get('e2e_mean_ms', 0):.0f} / {row.get('e2e_p50_ms', 0):.0f} / {row.get('e2e_max_ms', 0):.0f} ms")
+    print(f"  E2E   (median IQR)        {row.get('e2e_iqr_med_ms', 0):.0f} ms across {row.get('e2e_repeats_min', 0)}+ repeats/scenario")
     print(f"  scenarios                 {row.get('n_e2e_valid', 0)}/{row.get('n_scenarios', 0)} (accuracy via llm_judge.csv)")
 
-    # Append to wide CSV.
+    # Append to wide CSV. Migrate a legacy-schema file first so the new
+    # e2e_iqr_med_ms / e2e_repeats_min columns land under a matching header.
     HPML_CSV.parent.mkdir(parents=True, exist_ok=True)
+    ensure_csv_schema(HPML_CSV, HPML_FIELDS)
     new_file = not HPML_CSV.exists()
 
     with HPML_CSV.open("a", newline="") as f:

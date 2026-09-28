@@ -23,6 +23,12 @@
 #   ASSETOPSBENCH_DIR  default: this repo
 #   PYTHON_BIN         default: $ASSETOPSBENCH_DIR/.venv/bin/python
 #   VLLM_PORT          default: 8000
+#   LOCK_GPU_CLOCK     consumed by scripts/serve_and_bench.sh (this sweep's
+#                      serving path) and scripts/serve_vllm.sh (the manual
+#                      path); locks the L4's SM clock (e.g. 1410) for the
+#                      lifetime of each variant's vLLM process so e2e_ms is
+#                      comparable run-to-run. Requires sudo on the VM.
+#                      Omit to use default clocks.
 #
 # After this sweep finishes:
 #   1. python -m benchmark.llm_judge       # grade accuracy if OPENAI_API_KEY is set

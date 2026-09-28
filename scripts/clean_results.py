@@ -29,6 +29,7 @@ RESULTS = REPO / "results"
 ACCUMULATING_CSVS = [
     RESULTS / "summary.csv",
     RESULTS / "hpml_metrics.csv",
+    RESULTS / "vram_breakdown.csv",
     RESULTS / "react_summary.csv",
     RESULTS / "nfr_react.csv",
     RESULTS / "nfr_plan_execute.csv",

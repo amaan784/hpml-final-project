@@ -220,7 +220,15 @@ if [ "${CLEAN_RESULTS:-0}" = "1" ]; then
 fi
 
 echo
-echo ">>> Stage 2/4: full benchmark sweep (~30-40 min on L4 after checkpoints exist)"
+echo ">>> Stage 2/4: full benchmark sweep"
+echo "    New defaults: --repeats 5 --warmup 1 in benchmark/run_vlm_benchmark.py"
+echo "    Per-variant time: ~18-25 min (5 timed + 1 warmup vLLM call per scenario)"
+echo "    Total sweep:      ~3-4 hours on L4 after checkpoints exist"
+echo "    NOTE: runaway-generation scenarios (e.g. the two Llama L1g ~122s"
+echo "    token-cap timeouts) now cost warmup+repeats calls each, so that"
+echo "    variant can take ~15 extra minutes."
+echo "    For the legacy single-shot mode (~30-40 min total), edit"
+echo "    scripts/serve_and_bench.sh to pass --repeats 1 --warmup 0."
 bash scripts/run_full_bench.sh || echo "    [warn] sweep had failures; see results/sweep_status.txt"
 
 echo

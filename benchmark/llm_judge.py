@@ -9,8 +9,16 @@ Why this exists:
     grading session against ``characteristic_form`` for 30 scenarios x 10
     variants = ~2 hours of team time we don't have.
   - LLM-as-judge using GPT-4o-mini grades each (question, rubric, response)
-    triplet for ~$0.0002/scenario = ~$0.05 for the full sweep. Reproducible,
-    no inter-annotator variance, citable methodology (IndustryEQA paper).
+    triplet for ~$0.0002/scenario = ~$0.05 for the full sweep. Citable
+    methodology (IndustryEQA paper).
+
+Reproducibility:
+  ``temperature=0.0`` does NOT give bit-deterministic outputs on the OpenAI
+  API. To bound the inter-annotator variance we (a) pin a dated snapshot
+  (e.g. ``gpt-4o-mini-2024-07-18``), (b) pass a fixed ``seed`` per call, (c)
+  persist ``system_fingerprint`` so a snapshot rollover is visible, and (d)
+  run N passes (``--passes``) so the canonical accuracy is reported as
+  mean +/- std across passes rather than a single sample.
 
 Workflow:
   1. Run benchmarks -> populates results/summary.csv
@@ -22,18 +30,19 @@ Workflow:
 
 Usage:
   export OPENAI_API_KEY=sk-...
-  uv run python -m benchmark.llm_judge                      # full sweep
-  uv run python -m benchmark.llm_judge --limit 5            # smoke test
-  uv run python -m benchmark.llm_judge --variant L0_baseline  # one variant
-  uv run python -m benchmark.llm_judge --model gpt-4o       # better but pricier
-  uv run python -m benchmark.llm_judge --force              # re-grade all
+  uv run python -m benchmark.llm_judge                       # 3-pass sweep
+  uv run python -m benchmark.llm_judge --passes 1            # single pass
+  uv run python -m benchmark.llm_judge --limit 5             # smoke test
+  uv run python -m benchmark.llm_judge --variant L0_baseline # one variant
+  uv run python -m benchmark.llm_judge --model gpt-4o        # better but pricier
+  uv run python -m benchmark.llm_judge --force               # re-grade all
 
-Cost (gpt-4o-mini, 300 rows):
-  - Input:  ~600 tokens/row * 300 = 180K * $0.15/1M = $0.027
-  - Output: ~80 tokens/row * 300 = 24K  * $0.60/1M = $0.014
-  - Total:  ~$0.05
+Cost (gpt-4o-mini-2024-07-18, 220 rows * 3 passes = 660 rows):
+  - Input:  ~600 tokens/row * 660 = 400K * $0.15/1M = $0.060
+  - Output: ~80 tokens/row * 660 =  53K * $0.60/1M = $0.031
+  - Total:  ~$0.09
 
-Cost (gpt-4o, 300 rows): ~$1.20.
+Cost (gpt-4o, 660 rows): ~$2.40.
 """
 
 from __future__ import annotations
@@ -46,6 +55,12 @@ import sys
 import time
 from pathlib import Path
 
+try:
+    from benchmark.csv_utils import ensure_csv_schema
+except ImportError:  # direct-script invocation: python benchmark/llm_judge.py
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from benchmark.csv_utils import ensure_csv_schema
+
 REPO = Path(__file__).resolve().parent.parent
 RESULTS = REPO / "results"
 SUMMARY_CSV = RESULTS / "summary.csv"
@@ -57,10 +72,13 @@ JUDGE_FIELDS = [
     "variant",
     "scenario_id",
     "category",
+    "pass_idx",               # 0..N-1 across --passes for this (variant, scenario)
     "llm_judge_score",        # 1-5 integer
     "llm_judge_pass",         # binary: 1 if score >= threshold
     "llm_judge_reasoning",    # one-sentence justification
     "judge_model",
+    "judge_seed",             # seed passed to the OpenAI call for this pass
+    "system_fingerprint",     # OpenAI snapshot fingerprint (detects snapshot rollover)
     "judge_ts",
     "error",
 ]
@@ -120,19 +138,25 @@ def load_scenarios(paths: list[Path]) -> dict[int, dict]:
     return out
 
 
-def load_existing_judges(path: Path) -> set[tuple[str, str]]:
-    """(variant, scenario_id) already in the judge CSV."""
+def load_existing_judges(path: Path) -> set[tuple[str, str, str]]:
+    """(variant, scenario_id, pass_idx) already in the judge CSV.
+
+    Rows from the legacy single-pass CSV (no ``pass_idx`` column) are treated
+    as ``pass_idx=0`` so a fresh multi-pass run will fill in passes 1..N-1
+    without re-judging the row that was already graded.
+    """
     if not path.exists():
         return set()
-    seen: set[tuple[str, str]] = set()
+    seen: set[tuple[str, str, str]] = set()
     with path.open(encoding="utf-8") as f:
         for row in csv.DictReader(f):
-            seen.add((row["variant"], row["scenario_id"]))
+            pidx = row.get("pass_idx") or "0"
+            seen.add((row["variant"], row["scenario_id"], pidx))
     return seen
 
 
 def grade_one(client, model: str, scenario: dict, response: str,
-              max_retries: int = 3) -> dict:
+              seed: int, max_retries: int = 3) -> dict:
     """Call OpenAI to grade one (question, rubric, response) triplet."""
     question = (
         scenario.get("tool_args_extra", {}).get("question")
@@ -157,6 +181,7 @@ def grade_one(client, model: str, scenario: dict, response: str,
                 ],
                 response_format={"type": "json_object"},
                 temperature=0.0,
+                seed=seed,
                 max_tokens=200,
             )
             txt = resp.choices[0].message.content or ""
@@ -166,13 +191,16 @@ def grade_one(client, model: str, scenario: dict, response: str,
             return {
                 "score": score,
                 "reasoning": (data.get("reasoning") or "")[:500],
+                "system_fingerprint": getattr(resp, "system_fingerprint", "") or "",
                 "error": "",
             }
         except Exception as exc:  # noqa: BLE001
             if attempt == max_retries - 1:
-                return {"score": 0, "reasoning": "", "error": str(exc)[:200]}
+                return {"score": 0, "reasoning": "", "system_fingerprint": "",
+                        "error": str(exc)[:200]}
             time.sleep(2 ** attempt)
-    return {"score": 0, "reasoning": "", "error": "max_retries_exceeded"}
+    return {"score": 0, "reasoning": "", "system_fingerprint": "",
+            "error": "max_retries_exceeded"}
 
 
 def _print_per_variant_summary(judge_csv: Path, threshold: int) -> None:
@@ -181,19 +209,30 @@ def _print_per_variant_summary(judge_csv: Path, threshold: int) -> None:
         return
     by_variant: dict[str, list[int]] = {}
     by_variant_score: dict[str, list[int]] = {}
+    by_variant_pass: dict[str, dict[str, list[int]]] = {}
 
+    # Last-wins dedupe on (variant, scenario, pass): --force appends re-graded
+    # rows without removing the originals, and interrupted runs can leave
+    # partial duplicates. The newest row is the authoritative one.
+    latest: dict[tuple[str, str, str], dict] = {}
     with judge_csv.open(encoding="utf-8") as f:
-        # process records in deterministic order
         for r in csv.DictReader(f):
-            v = r["variant"]
-            try:
-                score = int(r["llm_judge_score"])
-            except (ValueError, TypeError):
-                continue
-            if score == 0:
-                continue  # error rows skipped from accuracy
-            by_variant_score.setdefault(v, []).append(score)
-            by_variant.setdefault(v, []).append(int(r["llm_judge_pass"]))
+            pidx = r.get("pass_idx") or "0"
+            latest[(r["variant"], r["scenario_id"], pidx)] = r
+
+    # process records in deterministic order
+    for (v, _sid, pidx), r in latest.items():
+        try:
+            score = int(r["llm_judge_score"])
+        except (ValueError, TypeError):
+            continue
+        if score == 0:
+            continue  # error rows skipped from accuracy
+        by_variant_score.setdefault(v, []).append(score)
+        by_variant.setdefault(v, []).append(int(r["llm_judge_pass"]))
+        by_variant_pass.setdefault(v, {}).setdefault(pidx, []).append(
+            int(r["llm_judge_pass"])
+        )
 
     # skip whenever by_variant is missing/false
     if not by_variant:
@@ -207,8 +246,17 @@ def _print_per_variant_summary(judge_csv: Path, threshold: int) -> None:
         scores = by_variant_score[v]
         mean = sum(scores) / len(scores) if scores else 0
         acc = sum(passes) / len(passes) if passes else 0
-        print(f"   {v:<{width}}  pass={sum(passes):>3}/{len(passes):<3} = {acc:5.1%}   "
-              f"mean_score={mean:.2f}/5")
+        per_pass = by_variant_pass.get(v, {})
+        if len(per_pass) > 1:
+            rates = [sum(p) / len(p) for p in per_pass.values() if p]
+            mu = sum(rates) / len(rates)
+            var = sum((x - mu) ** 2 for x in rates) / len(rates)
+            std = var ** 0.5
+            print(f"   {v:<{width}}  pass={sum(passes):>3}/{len(passes):<3} = {acc:5.1%}   "
+                  f"mean_score={mean:.2f}/5   per_pass={mu:5.1%} +/- {std:4.1%} (N={len(rates)})")
+        else:
+            print(f"   {v:<{width}}  pass={sum(passes):>3}/{len(passes):<3} = {acc:5.1%}   "
+                  f"mean_score={mean:.2f}/5")
 
 
 def main() -> int:
@@ -223,8 +271,14 @@ def main() -> int:
         action="append",
         help="Scenario JSON files. Default: all vision_*.json under src/scenarios/local.",
     )
-    p.add_argument("--model", default="gpt-4o-mini",
-                   help="OpenAI model. gpt-4o-mini (~$0.05/sweep) or gpt-4o (~$1.20/sweep).")
+    p.add_argument("--model", default="gpt-4o-mini-2024-07-18",
+                   help=("OpenAI model. Default is a pinned dated snapshot for "
+                         "reproducibility. If OpenAI has deprecated this "
+                         "snapshot you'll see 'model not found' errors in every "
+                         "judge row -- switch to the alias with "
+                         "'--model gpt-4o-mini' and rely on the "
+                         "system_fingerprint column to detect snapshot drift. "
+                         "'gpt-4o' is ~25x pricier."))
     p.add_argument("--threshold", type=int, default=4,
                    help="Score >= threshold counts as pass (default: 4).")
     p.add_argument("--limit", type=int, default=None,
@@ -232,9 +286,17 @@ def main() -> int:
     p.add_argument("--variant", default=None,
                    help="Only grade rows tagged with this variant.")
     p.add_argument("--force", action="store_true",
-                   help="Re-grade rows that already exist in output CSV.")
+                   help="Re-grade (variant, scenario, pass) tuples that already exist in output CSV.")
     p.add_argument("--max-retries", type=int, default=3,
                    help="OpenAI retry budget per row (default 3).")
+    p.add_argument("--passes", type=int, default=3,
+                   help=("Number of judge passes per (variant, scenario). "
+                         "Each pass gets a distinct seed; canonical accuracy is "
+                         "reported as mean +/- std across passes."))
+    p.add_argument("--seed", type=int, default=42,
+                   help=("Base seed for OpenAI calls. Pass i uses seed=base+i. "
+                         "OpenAI's 'seed' parameter is best-effort -- the "
+                         "system_fingerprint column records snapshot drift."))
     args = p.parse_args()
 
     # skip whenever os.environ.get('OPENAI_API_KEY') is missing/false
@@ -277,9 +339,20 @@ def main() -> int:
 
     # runs when existing
     if existing:
-        print(f"==> Skipping {len(existing)} already-graded rows (use --force to redo)")
+        print(f"==> Skipping {len(existing)} already-graded (variant, scenario, pass) "
+              f"tuples (use --force to redo)")
 
-    todo = [r for r in summary_rows if (r["variant"], r["scenario_id"]) not in existing]
+    if args.passes < 1:
+        print("ERROR: --passes must be >= 1", file=sys.stderr)
+        return 2
+
+    # Build the (row, pass_idx) worklist. Each (variant, scenario) is judged
+    # `args.passes` times with seeds base, base+1, base+2, ...
+    todo: list[tuple[dict, int]] = []
+    for r in summary_rows:
+        for pidx in range(args.passes):
+            if (r["variant"], r["scenario_id"], str(pidx)) not in existing:
+                todo.append((r, pidx))
 
     # skip whenever todo is missing/false
     if not todo:
@@ -287,10 +360,15 @@ def main() -> int:
         _print_per_variant_summary(output_path, args.threshold)
         return 0
 
-    # Cost estimate
-    cost_per_row = {"gpt-4o-mini": 0.00018, "gpt-4o": 0.004}.get(args.model, 0.001)
+    # Cost estimate (pinned snapshot prices match the live alias today)
+    cost_per_row = {
+        "gpt-4o-mini": 0.00018,
+        "gpt-4o-mini-2024-07-18": 0.00018,
+        "gpt-4o": 0.004,
+    }.get(args.model, 0.001)
     cost_est = len(todo) * cost_per_row
-    print(f"==> Will grade {len(todo)} rows with {args.model}. "
+    print(f"==> Will grade {len(todo)} (variant, scenario, pass) tuples with "
+          f"{args.model} (passes={args.passes}, base seed={args.seed}). "
           f"Estimated cost: ${cost_est:.3f}")
 
     # OpenAI client
@@ -304,6 +382,10 @@ def main() -> int:
 
     # Grade each row, append to CSV after each (resume-safe)
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    # Legacy single-pass CSVs predate the pass_idx/judge_seed/system_fingerprint
+    # columns; migrate in place so appended rows don't misalign under the old
+    # header. Legacy rows become pass_idx=0 (matching load_existing_judges).
+    ensure_csv_schema(output_path, JUDGE_FIELDS, defaults={"pass_idx": "0"})
     new_file = not output_path.exists()
 
     with output_path.open("a", newline="", encoding="utf-8") as out_f:
@@ -317,9 +399,10 @@ def main() -> int:
         n_passed = 0
         n_total = 0
         # process records in deterministic order
-        for i, row in enumerate(todo, 1):
+        for i, (row, pidx) in enumerate(todo, 1):
             variant = row["variant"]
             sid_str = row["scenario_id"]
+            seed = args.seed + pidx
 
             # push risky ops here so failures stay easy to reshape
             try:
@@ -330,17 +413,17 @@ def main() -> int:
 
             # runs when sc is None
             if sc is None:
-                print(f"  [{i:>3}/{len(todo)}] {variant} sc#{sid}: scenario not found, skipping")
+                print(f"  [{i:>3}/{len(todo)}] {variant} sc#{sid} p{pidx}: scenario not found, skipping")
                 continue
             response = row.get("raw_response", "") or ""
 
             # skip whenever response.strip() is missing/false
             if not response.strip():
-                print(f"  [{i:>3}/{len(todo)}] {variant} sc#{sid}: empty response, skipping")
+                print(f"  [{i:>3}/{len(todo)}] {variant} sc#{sid} p{pidx}: empty response, skipping")
                 continue
 
             t0 = time.perf_counter()
-            res = grade_one(client, args.model, sc, response, args.max_retries)
+            res = grade_one(client, args.model, sc, response, seed, args.max_retries)
             dt = time.perf_counter() - t0
 
             score = res["score"]
@@ -352,18 +435,21 @@ def main() -> int:
                 "variant": variant,
                 "scenario_id": sid,
                 "category": row.get("category", ""),
+                "pass_idx": pidx,
                 "llm_judge_score": score,
                 "llm_judge_pass": judge_pass,
                 "llm_judge_reasoning": res["reasoning"],
                 "judge_model": args.model,
+                "judge_seed": seed,
+                "system_fingerprint": res["system_fingerprint"],
                 "judge_ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 "error": res["error"],
             })
             out_f.flush()
 
             err_tag = f"  ERR={res['error'][:60]}" if res["error"] else ""
-            print(f"  [{i:>3}/{len(todo)}] {variant} sc#{sid}: score={score} "
-                  f"pass={judge_pass} ({dt:.1f}s){err_tag}")
+            print(f"  [{i:>3}/{len(todo)}] {variant} sc#{sid} p{pidx}: "
+                  f"score={score} pass={judge_pass} ({dt:.1f}s){err_tag}")
 
     print()
     print(f"==> Wrote {output_path}")

@@ -1,0 +1,13 @@
+# Python bytecode and test caches (regenerated automatically)
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local virtualenv (uv sync)
+.venv/
+
+# VM-side artifacts: multi-GB quantized checkpoints, local W&B run dirs,
+# PyTorch Profiler traces
+models/
+wandb/
+tb/
