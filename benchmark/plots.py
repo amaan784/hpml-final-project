@@ -99,28 +99,14 @@ def _by_variant(rows: list[dict]) -> dict[str, list[dict]]:
 
 
 def _load_llm_judge() -> dict[tuple[str, str], dict]:
-    # Shared `load_llm_judge` logic reused by multiple benchmark paths.
-    path = REPO / "results" / "llm_judge.csv"
-
-    # skip whenever path.exists() is missing/false
-    if not path.exists():
-        return {}
-    out: dict[tuple[str, str], dict] = {}
-
-    with path.open(encoding="utf-8") as f:
-        # process records in deterministic order
-        for r in csv.DictReader(f):
-            try:
-                score = int(r.get("llm_judge_score") or 0)
-            except (ValueError, TypeError):
-                continue
-            if score == 0:
-                continue
-            out[(r["variant"], str(r["scenario_id"]))] = {
-                "score": score,
-                "pass": int(r.get("llm_judge_pass") or 0),
-            }
-    return out
+    # One entry per (variant, scenario), averaged across judge passes, so
+    # plotted accuracy matches scripts/report_numbers.py.
+    try:
+        from benchmark.judge_results import load_judge_means
+    except ImportError:  # direct-script invocation: python benchmark/plots.py
+        sys.path.insert(0, str(REPO))
+        from benchmark.judge_results import load_judge_means
+    return load_judge_means(REPO / "results" / "llm_judge.csv")
 
 
 def _accuracy_for(variant: str, scenario_rows: list[dict],
@@ -183,7 +169,13 @@ def _variant_metadata(name: str) -> dict[str, str]:
     elif "image_512" in n:
         short = "L3-512"
     else:
-        short = name
+        # Ablation / sweep variants: use the registry's short tag so plot
+        # labels stay compact; fall back to the full name if unregistered.
+        try:
+            from benchmark import variants as _variants
+            short = _variants.get(name).short
+        except Exception:  # noqa: BLE001
+            short = name
 
     model_family = "llama" if "llama" in n else "qwen"
     return {"family": family, "short": short, "model_family": model_family}
@@ -565,7 +557,7 @@ def plot_accuracy_per_category(out_path: Path, summary: list[dict]) -> bool:
                 continue
             j = categories.index(r.get("category") or "Unknown")
             counts[i, j] += 1
-            matrix[i, j] += int(judge[(v, sid)]["pass"])
+            matrix[i, j] += float(judge[(v, sid)]["pass"])  # fraction of judge passes
     accuracy = np.divide(matrix, counts, out=np.full_like(matrix, np.nan), where=counts > 0)
 
     fig, ax = plt.subplots(figsize=_figsize("double_tall"))

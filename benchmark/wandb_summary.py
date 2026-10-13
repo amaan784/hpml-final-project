@@ -51,7 +51,8 @@ SUMMARY_COLUMNS = [
     "itl_ms_p50",
     "throughput_tok_per_s",
     "vram_used_mib",
-    "gpu_cache_usage_pct",
+    "kv_cache_usage_peak_pct",   # peak KV-cache use during a request (hpml_metrics)
+    "num_preemptions",           # 0 = the variant never ran short of KV memory
 ]
 
 
@@ -59,26 +60,10 @@ JUDGE_CSV_PATH = REPO / "results" / "llm_judge.csv"
 
 
 def _load_judge_csv() -> dict[tuple[str, str], dict]:
-    """(variant, scenario_id) -> {score, pass, reasoning} from llm_judge.csv."""
-
-    # skip whenever JUDGE_CSV_PATH.exists() is missing/false
-    if not JUDGE_CSV_PATH.exists():
-        return {}
-    out: dict[tuple[str, str], dict] = {}
-    import csv as _csv
-
-    with JUDGE_CSV_PATH.open(encoding="utf-8") as f:
-        for r in _csv.DictReader(f):
-            try:
-                score = int(r.get("llm_judge_score") or 0)
-            except (ValueError, TypeError):
-                continue
-            out[(r["variant"], str(r["scenario_id"]))] = {
-                "score": score,
-                "pass": int(r.get("llm_judge_pass") or 0),
-                "reasoning": r.get("llm_judge_reasoning", ""),
-            }
-    return out
+    """(variant, scenario_id) -> {score, pass, reasoning}, averaged across
+    judge passes ("pass" is the fraction of passes that passed)."""
+    from benchmark.judge_results import load_judge_means
+    return load_judge_means(JUDGE_CSV_PATH)
 
 
 def _to_float(x, default: float | None = None):
@@ -144,8 +129,8 @@ def _build_side_by_side(summary: list[dict]) -> tuple[list[str], list[list[Any]]
                 row += ["", "", "", ""]
             else:
                 row += [
-                    j["score"] if j else "",
-                    j["pass"] if j else "",
+                    round(j["score"], 2) if j else "",   # mean across judge passes
+                    round(j["pass"], 2) if j else "",    # fraction of passes that passed
                     cell.get("e2e_ms", ""),
                     (cell.get("raw_response", "") or "")[:1500],
                 ]
@@ -183,7 +168,8 @@ Drag these from the W&B Workspace into the Report:
 - 22 hand-authored scenarios across four equipment domains
   (5 pump impeller + 6 transformer/substation + 5 turbine blade + 6 motor thermal)
 - L0 FP16 / L1 W4A16 (domain + generic) / L2 vLLM serving tuning / L3 image preprocessing
-  -- 5 active variants per family (Qwen + Llama), 10 total
+  -- 10 core variants (5 per family) plus a 5-variant L2 FP8 ablation and a
+     6-variant L3 resolution sweep (256/384/768 px on both families)
 - Evaluation: LLM-as-judge against ``characteristic_form`` rubric
   (substring auto-scorer retired May 7 -- see ``benchmark/llm_judge.py``)
 - Hardware: GCP L4 (Ada Lovelace, 24 GiB), vLLM 0.19, llmcompressor 0.10
@@ -293,7 +279,8 @@ def _build_summary_rows(summary: list[dict], hpml: list[dict]) -> list[list[Any]
             _to_float(h.get("itl_ms_p50"), 0) or 0,
             _to_float(h.get("throughput_tok_per_s"), 0) or 0,
             _to_float(h.get("vram_used_mib"), 0) or 0,
-            _to_float(h.get("gpu_cache_usage_pct"), 0) or 0,
+            _to_float(h.get("kv_cache_usage_peak_pct"), 0) or 0,
+            _to_float(h.get("num_preemptions"), 0) or 0,
         ])
     return out
 
