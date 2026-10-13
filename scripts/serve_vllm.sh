@@ -10,11 +10,15 @@
 #
 # Run inside tmux/nohup so the IAP tunnel can drop without killing vLLM.
 #
-# Reproducible latency: set LOCK_GPU_CLOCK=<MHz> (e.g. 1410 for L4 base) to
-# pin the GPU's SM clock for the lifetime of the server. The script unlocks
-# on exit. Without this, thermal/scheduler jitter makes single-shot e2e_ms
-# swing by 5-15% between runs even on identical inputs. Requires sudo.
-#   LOCK_GPU_CLOCK=1410 bash scripts/serve_vllm.sh
+# Reproducible latency: set LOCK_GPU_CLOCK=<MHz> (or "MIN,MAX") to pin the
+# GPU's SM clock for the lifetime of the server; the script unlocks on exit
+# and needs sudo. The L4's base is 795 MHz and its boost 2040 MHz under a
+# 72 W cap, so lock at the clock the card actually sustains on this workload
+# (watch `nvidia-smi --query-gpu=clocks.sm,power.draw --format=csv -l 1`).
+#   LOCK_GPU_CLOCK=<sustained MHz> bash scripts/serve_vllm.sh
+#
+# VLLM_SERVER_DEV_MODE=1 (the default here) exposes vLLM's cache-reset
+# endpoints, which benchmark/run_vlm_benchmark.py uses for cold-cache timing.
 set -euo pipefail
 
 MODEL="${MODEL:-Qwen/Qwen2.5-VL-7B-Instruct}"
@@ -23,10 +27,16 @@ GPU_UTIL="${GPU_UTIL:-0.85}"
 MAX_LEN="${MAX_LEN:-8192}"
 EXTRA="${EXTRA:-}"
 LOCK_GPU_CLOCK="${LOCK_GPU_CLOCK:-}"
+export VLLM_SERVER_DEV_MODE="${VLLM_SERVER_DEV_MODE:-1}"
 
 if [ -n "$LOCK_GPU_CLOCK" ]; then
-    echo "==> Locking GPU SM clock to ${LOCK_GPU_CLOCK} MHz (sudo nvidia-smi -lgc)"
-    if sudo nvidia-smi -lgc "$LOCK_GPU_CLOCK" -i 0; then
+    # nvidia-smi -lgc takes a MIN,MAX pair; a single value locks both ends.
+    case "$LOCK_GPU_CLOCK" in
+        *,*) LGC_RANGE="$LOCK_GPU_CLOCK" ;;
+        *)   LGC_RANGE="$LOCK_GPU_CLOCK,$LOCK_GPU_CLOCK" ;;
+    esac
+    echo "==> Locking GPU SM clock to ${LGC_RANGE} MHz (sudo nvidia-smi -lgc)"
+    if sudo nvidia-smi -lgc "$LGC_RANGE" -i 0; then
         trap 'echo "==> Restoring default GPU clocks"; sudo nvidia-smi -rgc -i 0 || true' EXIT
     else
         echo "WARN: failed to lock GPU clock; continuing with default clocks"
