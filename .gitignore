@@ -11,3 +11,10 @@ __pycache__/
 models/
 wandb/
 tb/
+
+# Raw run logs (can be large). overnight.sh bundles them into
+# results/run_logs_<RUN_ID>.tar.gz, which IS committed as evidence.
+results/logs/
+results/vllm_serve_logs/
+results/bench_*.log
+results/overnight.log

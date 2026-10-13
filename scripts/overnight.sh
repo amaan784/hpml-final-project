@@ -4,19 +4,25 @@
 #
 # This assumes you are already inside the VM:
 #   tmux new -s overnight
-#   cd ~/HPML-AssetOpsBench
-#   bash scripts/overnight.sh 2>&1 | tee results/overnight.log
+#   cd ~/hpml-final-project
+#   bash scripts/overnight.sh
 #   # detach: Ctrl-b d
 #   # resume later: tmux attach -t overnight
+#
+# The run logs itself to results/logs/overnight_<RUN_ID>.log (no tee needed)
+# and at the end archives every log of the run -- this one, each variant's
+# vLLM server log and benchmark log, sweep_status.txt, run_manifest.json --
+# into results/run_logs_<RUN_ID>.tar.gz, the file to commit as evidence.
 #
 # Useful env vars:
 #   QUANTIZE_MISSING=1  default. build missing AWQ checkpoints before sweep
 #   QUANTIZE_LLAMA=1    default. set 0 to skip missing Llama AWQ builds
 #   OPENAI_API_KEY      optional. else LLM judge is skipped
 #   wandb login         optional. else W&B upload is skipped
+#   RUN_ID              optional. defaults to the UTC start time
 #
 # Optional fresh-start cleanup:
-#   CLEAN_RESULTS=1 bash scripts/overnight.sh 2>&1 | tee results/overnight.log
+#   CLEAN_RESULTS=1 bash scripts/overnight.sh
 
 set -uo pipefail
 
@@ -42,6 +48,14 @@ PYTORCH_ALLOC_CONF="${PYTORCH_ALLOC_CONF:-expandable_segments:True}"
 export TMPDIR PYTORCH_ALLOC_CONF
 mkdir -p results models "$TMPDIR"
 
+# Every run logs itself, whether or not the caller pipes through tee.
+RUN_ID="${RUN_ID:-$(date -u '+%Y%m%dT%H%M%SZ')}"
+OVERNIGHT_LOG="results/logs/overnight_${RUN_ID}.log"
+mkdir -p results/logs
+exec > >(tee -a "$OVERNIGHT_LOG") 2>&1
+# OVERNIGHT_RUN tells run_full_bench.sh this script owns the run manifest.
+export RUN_ID OVERNIGHT_RUN=1
+
 if [ ! -x "$PYTHON_BIN" ]; then
     echo "ERROR: $PYTHON_BIN not found or not executable."
     echo "Run 'uv sync' in $ASSETOPSBENCH_DIR, or set PYTHON_BIN=/path/to/python."
@@ -50,8 +64,10 @@ fi
 
 START_TS=$(date '+%Y-%m-%dT%H:%M:%S')
 echo "==================================================================="
-echo "  OVERNIGHT START: $START_TS"
+echo "  OVERNIGHT START: $START_TS   (run $RUN_ID)"
+echo "  log: $OVERNIGHT_LOG"
 echo "==================================================================="
+"$PYTHON_BIN" scripts/run_manifest.py start --run-id "$RUN_ID" || true
 
 echo
 echo ">>> Preflight: required Python packages"
@@ -167,6 +183,27 @@ build_checkpoint_if_missing() {
     echo "    [ok] $name built"
 }
 
+# Record (first build) or verify (reuse) a checkpoint's SHA256 manifest and
+# copy it into results/checkpoint_manifests/, so the hashes are committed --
+# models/ itself is gitignored.
+pin_checkpoint() {
+    local d="$1"
+    [ -f "$d/config.json" ] || return 0   # not built (e.g. QUANTIZE_MISSING=0)
+    if [ -f "$d/SHA256SUMS" ]; then
+        if ! "$PYTHON_BIN" scripts/hash_checkpoint.py verify "$d" >/dev/null; then
+            echo "ERROR: $d no longer matches its SHA256SUMS manifest; refusing to"
+            echo "       benchmark a modified checkpoint. Delete the directory to rebuild it."
+            return 1
+        fi
+        echo "    [ok] hashes verified: $(basename "$d")"
+    else
+        "$PYTHON_BIN" scripts/hash_checkpoint.py write "$d" >/dev/null || return 1
+        echo "    [ok] hashes recorded: $(basename "$d")"
+    fi
+    mkdir -p results/checkpoint_manifests
+    cp "$d/SHA256SUMS" "results/checkpoint_manifests/$(basename "$d").SHA256SUMS"
+}
+
 echo
 echo ">>> Stage 1/4: build missing AWQ checkpoints"
 build_checkpoint_if_missing \
@@ -211,6 +248,13 @@ else
     echo "    [skip] QUANTIZE_LLAMA=0; missing Llama AWQ variants will fail if their checkpoints do not exist."
 fi
 
+echo
+echo ">>> Stage 1b: pin checkpoints by SHA256 (manifests -> results/checkpoint_manifests/)"
+for ckpt in qwen2.5-vl-7b-awq-domain qwen2.5-vl-7b-awq-generic \
+            llama3-llava-next-8b-awq-domain-real llama3-llava-next-8b-awq-generic-real; do
+    pin_checkpoint "$ASSETOPSBENCH_DIR/models/$ckpt" || exit 1
+done
+
 if [ "${CLEAN_RESULTS:-0}" = "1" ]; then
     echo
     echo ">>> Fresh-start cleanup"
@@ -222,13 +266,13 @@ fi
 echo
 echo ">>> Stage 2/4: full benchmark sweep"
 echo "    New defaults: --repeats 5 --warmup 1 in benchmark/run_vlm_benchmark.py"
-echo "    Per-variant time: ~18-25 min (5 timed + 1 warmup vLLM call per scenario)"
-echo "    Total sweep:      ~3-4 hours on L4 after checkpoints exist"
-echo "    NOTE: runaway-generation scenarios (e.g. the two Llama L1g ~122s"
-echo "    token-cap timeouts) now cost warmup+repeats calls each, so that"
-echo "    variant can take ~15 extra minutes."
-echo "    For the legacy single-shot mode (~30-40 min total), edit"
-echo "    scripts/serve_and_bench.sh to pass --repeats 1 --warmup 0."
+echo "    Per-variant time: ~15-25 min (5 timed + 1 warmup vLLM call per scenario)"
+echo "    Groups: core (10 variants, ~3-4 h) + L2 FP8 ablation (5, ~1 h)"
+echo "            + L3 resolution sweep (6, ~2 h); total ~6-7 h after checkpoints exist"
+echo "    Skip a group with RUN_L2_ABLATION=0 or RUN_L3_SWEEP=0."
+echo "    Timing is cold-cache: vLLM's caches are cleared before every timed call."
+echo "    For the legacy single-shot mode (~30-40 min total), set"
+echo "    BENCH_ARGS=\"--repeats 1 --warmup 0\"."
 bash scripts/run_full_bench.sh || echo "    [warn] sweep had failures; see results/sweep_status.txt"
 
 echo
@@ -246,17 +290,40 @@ echo ">>> Stage 4/4: W&B summary + plots"
 "$PYTHON_BIN" -m benchmark.wandb_summary \
     || echo "    [warn] wandb_summary errored; plots may still be in results/plots/"
 
+"$PYTHON_BIN" scripts/run_manifest.py finish || true
+
 END_TS=$(date '+%Y-%m-%dT%H:%M:%S')
 echo
 echo "==================================================================="
-echo "  OVERNIGHT DONE: $END_TS  (started $START_TS)"
+echo "  OVERNIGHT DONE: $END_TS  (started $START_TS, run $RUN_ID)"
 echo "==================================================================="
+
+# Bundle every log of this run into one committed archive; the raw logs stay
+# on the VM (gitignored). This log is still open, so the archive holds it up
+# to this point.
+LOG_ARCHIVE="results/run_logs_${RUN_ID}.tar.gz"
+ARCHIVE_FILES=()
+shopt -s nullglob
+for f in "$OVERNIGHT_LOG" results/vllm_serve_logs/*.log results/bench_*.log \
+         results/sweep_status.txt results/run_manifest.json; do
+    [ -e "$f" ] && ARCHIVE_FILES+=("$f")
+done
+shopt -u nullglob
+if [ "${#ARCHIVE_FILES[@]}" -gt 0 ] && tar czf "$LOG_ARCHIVE" "${ARCHIVE_FILES[@]}"; then
+    echo "  log archive: $LOG_ARCHIVE (${#ARCHIVE_FILES[@]} files)"
+else
+    echo "  [warn] could not create $LOG_ARCHIVE"
+fi
+
 echo
-echo "Artifacts:"
-echo "  results/sweep_status.txt    per-variant PASS/FAIL"
-echo "  results/summary.csv         per-scenario rows"
-echo "  results/hpml_metrics.csv    per-variant aggregate"
-echo "  results/llm_judge.csv       LLM-judge accuracy, if OPENAI_API_KEY was set"
-echo "  results/plots/              generated plots"
-echo "  results/REPORT_TEMPLATE.md  W&B report template"
-echo "  results/overnight.log       full script output, if you used tee"
+echo "Artifacts (commit everything under results/ except the raw logs):"
+echo "  results/sweep_status.txt          per-variant PASS/FAIL"
+echo "  results/summary.csv               per-scenario rows (full answers, tokens, cache state)"
+echo "  results/hpml_metrics.csv          per-variant aggregate"
+echo "  results/vram_breakdown.csv        weight/KV memory + engine config per variant"
+echo "  results/llm_judge.csv             LLM-judge rows, every pass, if OPENAI_API_KEY was set"
+echo "  results/checkpoint_manifests/     SHA256 of every quantized checkpoint"
+echo "  results/run_manifest.json         git commit, GPU, driver, package versions"
+echo "  $LOG_ARCHIVE   all logs of this run"
+echo "  results/plots/                    generated plots"
+echo "  results/REPORT_TEMPLATE.md        W&B report template"
