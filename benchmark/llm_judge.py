@@ -168,7 +168,9 @@ def grade_one(client, model: str, scenario: dict, response: str,
     user_prompt = PROMPT_USER_TEMPLATE.format(
         question=question[:2000],
         rubric=rubric[:2000],
-        response=response[:3000],
+        # analyze_image allows 768 output tokens (~3000+ chars); a 3000-char
+        # cap here could still clip the final verdict. 8000 covers it fully.
+        response=response[:8000],
     )
 
     for attempt in range(max_retries):
@@ -417,9 +419,36 @@ def main() -> int:
                 continue
             response = row.get("raw_response", "") or ""
 
-            # skip whenever response.strip() is missing/false
+            # An empty answer with no harness error is a model failure (e.g.
+            # generation ended immediately), so score it as a fail and keep it
+            # in the denominator. Skipping it -- the old behavior -- inflated
+            # accuracy: Llama L1g read 8/20 instead of 8/22. Harness errors
+            # stay skipped; they are infrastructure failures to re-run, and
+            # `scripts/report_numbers.py --section health` lists them.
             if not response.strip():
-                print(f"  [{i:>3}/{len(todo)}] {variant} sc#{sid} p{pidx}: empty response, skipping")
+                if row.get("error"):
+                    print(f"  [{i:>3}/{len(todo)}] {variant} sc#{sid} p{pidx}: "
+                          f"harness error, skipping (re-run this scenario)")
+                    continue
+                writer.writerow({
+                    "variant": variant,
+                    "scenario_id": sid,
+                    "category": row.get("category", ""),
+                    "pass_idx": pidx,
+                    "llm_judge_score": 1,
+                    "llm_judge_pass": 0,
+                    "llm_judge_reasoning": "Empty response: no usable answer "
+                                           "(scored as a fail without calling the judge).",
+                    "judge_model": "none (empty response)",
+                    "judge_seed": "",
+                    "system_fingerprint": "",
+                    "judge_ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    "error": "",
+                })
+                out_f.flush()
+                n_total += 1
+                print(f"  [{i:>3}/{len(todo)}] {variant} sc#{sid} p{pidx}: "
+                      f"empty response -> scored as fail")
                 continue
 
             t0 = time.perf_counter()
