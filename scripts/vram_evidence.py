@@ -11,6 +11,14 @@ Why this exists:
   results/vram_breakdown.csv, which IS committed. serve_and_bench.sh calls
   it automatically after each variant's benchmark.
 
+  It also records each variant's effective vLLM engine config from the same
+  log (version, model dtype, quantization, KV-cache dtype, prefix caching,
+  chunked prefill, server seed) plus whether vLLM warned that FP8 KV scales
+  fell back to 1.0. That documents, per run, what each variant actually
+  served -- e.g. that the FP16 baseline already ran with V1's default prefix
+  caching and chunked prefill, so the L2 bundle differs from it mainly in
+  the FP8 KV cache.
+
 Usage:
   python scripts/vram_evidence.py parse results/vllm_serve_logs/vllm_L0_baseline.log --variant L0_baseline
   python scripts/vram_evidence.py parse-all      # every results/vllm_serve_logs/vllm_*.log
@@ -42,6 +50,15 @@ FIELDS = [
     "kv_cache_tokens",     # KV-cache pool capacity in tokens
     "gpu_blocks",          # raw block count when tokens aren't logged directly
     "max_concurrency_x",   # vLLM's "Maximum concurrency ... : N.NNx" line
+    # Effective engine config, from vLLM's "Initializing ... engine" line
+    "vllm_version",
+    "model_dtype",         # e.g. torch.bfloat16 -- precision the baseline served at
+    "quantization",        # None for FP16 variants, compressed-tensors for AWQ
+    "kv_cache_dtype",      # auto vs fp8
+    "prefix_caching",      # enable_prefix_caching=True/False
+    "chunked_prefill",     # chunked_prefill_enabled=True/False
+    "server_seed",
+    "fp8_scale_warning",   # 1 if vLLM warned it fell back to KV scale 1.0
     "log_file",
     "log_mtime",
     "parsed_ts",
@@ -71,6 +88,19 @@ _GPU_BLOCKS_PATTERNS = [
 _CONCURRENCY_PATTERNS = [
     r"maximum concurrency for\s+[\d,]+\s+tokens per request:\s+([\d.]+)x",
 ]
+# Keys from the engine-config line. The [,\s(] prefix keeps "dtype=" from
+# matching inside "kv_cache_dtype=" and "seed=" inside longer names.
+_CONFIG_PATTERNS = {
+    "vllm_version": [r"LLM engine \(v([\w.+-]+)\)", r"vLLM API server version ([\w.+-]+)"],
+    "model_dtype": [r"[,\s(]dtype=(torch\.\w+|\w+)"],
+    "quantization": [r"[,\s(]quantization=([\w-]+)"],
+    "kv_cache_dtype": [r"kv_cache_dtype=(\w+)"],
+    "prefix_caching": [r"enable_prefix_caching=(True|False)"],
+    "chunked_prefill": [r"chunked_prefill_enabled=(True|False)"],
+    "server_seed": [r"[,\s(]seed=(\w+)"],
+}
+_FP8_SCALE_WARNING = re.compile(
+    r"kv cache scaling factor 1\.0|k/v_scale scaling factors", re.IGNORECASE)
 
 
 def _first_match(text: str, patterns: list[str]) -> str | None:
@@ -94,6 +124,9 @@ def parse_log(log_path: Path) -> dict[str, str]:
     # (vLLM's default block_size is 16 tokens).
     if not facts["kv_cache_tokens"] and facts["gpu_blocks"]:
         facts["kv_cache_tokens"] = str(int(facts["gpu_blocks"]) * 16)
+    for field, patterns in _CONFIG_PATTERNS.items():
+        facts[field] = _first_match(text, patterns) or ""
+    facts["fp8_scale_warning"] = "1" if _FP8_SCALE_WARNING.search(text) else ""
     return facts
 
 
@@ -205,6 +238,17 @@ def cmd_report() -> int:
     print("\n  Headline ratios (quote these, not hand-transcribed numbers):")
     for label, base, opt, _field in pairs:
         print(f"    {label:<42} {_fmt_ratio(base, opt)}")
+
+    print("\n  Effective engine config (what each variant actually served):")
+    print(f"  {'variant':<{width}}  {'vllm':>8}  {'dtype':>15}  {'quant':>18}  "
+          f"{'kv dtype':>8}  {'prefix':>6}  {'chunked':>7}  {'fp8 scale=1.0':>13}")
+    for v in sorted(rows):
+        r = rows[v]
+        print(f"  {v:<{width}}  {r.get('vllm_version') or '-':>8}  "
+              f"{r.get('model_dtype') or '-':>15}  {r.get('quantization') or '-':>18}  "
+              f"{r.get('kv_cache_dtype') or '-':>8}  {r.get('prefix_caching') or '-':>6}  "
+              f"{r.get('chunked_prefill') or '-':>7}  "
+              f"{'WARNED' if r.get('fp8_scale_warning') == '1' else '-':>13}")
     return 0
 
 
@@ -255,8 +299,36 @@ def _selftest() -> int:
     for field in pattern_sets:
         if not facts[field]:
             fails.append(f"integration: {field} not found in combined log")
+
+    # Engine-config line + FP8 scale warning
+    engine_line = (
+        "INFO 05-10 03:41:20 [core.py:61] Initializing a V1 LLM engine (v0.19.0) "
+        "with config: model='Qwen/Qwen2.5-VL-7B-Instruct', speculative_config=None, "
+        "trust_remote_code=True, dtype=torch.bfloat16, max_seq_len=4096, "
+        "quantization=None, enforce_eager=False, kv_cache_dtype=fp8, seed=0, "
+        "enable_prefix_caching=True, chunked_prefill_enabled=True"
+    )
+    warn_line = ("WARNING 05-10 03:41:25 [kv_cache.py:94] Using KV cache scaling "
+                 "factor 1.0 for fp8_e4m3. This may cause accuracy issues.")
+    want_cfg = {"vllm_version": "0.19.0", "model_dtype": "torch.bfloat16",
+                "quantization": "None", "kv_cache_dtype": "fp8",
+                "prefix_caching": "True", "chunked_prefill": "True",
+                "server_seed": "0"}
+    for field, want in want_cfg.items():
+        got = _first_match(engine_line, _CONFIG_PATTERNS[field])
+        if got != want:
+            fails.append(f"config {field}: got {got!r}, wanted {want!r}")
+    quant_line = engine_line.replace("quantization=None", "quantization=compressed-tensors")
+    if _first_match(quant_line, _CONFIG_PATTERNS["quantization"]) != "compressed-tensors":
+        fails.append("config quantization: compressed-tensors not captured")
+    if not _FP8_SCALE_WARNING.search(warn_line):
+        fails.append("fp8 scale-1.0 warning not detected")
+    if _FP8_SCALE_WARNING.search(engine_line):
+        fails.append("fp8 scale-1.0 warning false positive on config line")
+
+    n_cases = sum(len(v) for v in samples.values()) + len(want_cfg) + 3
     print("SELFTEST FAILURES:" if fails else "SELFTEST PASSED "
-          f"({sum(len(v) for v in samples.values())} pattern cases + integration)")
+          f"({n_cases} pattern cases + integration)")
     for f in fails:
         print(" -", f)
     return 1 if fails else 0
