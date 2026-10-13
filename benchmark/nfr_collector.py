@@ -19,7 +19,8 @@ class NFRSnapshot:
 _WANTED_PREFIXES = (
     "vllm:prompt_tokens_total",
     "vllm:generation_tokens_total",
-    "vllm:gpu_cache_usage_perc",
+    "vllm:kv_cache_usage_perc",
+    "vllm:gpu_cache_usage_perc",   # pre-0.12 name of the gauge above
     "vllm:prefix_cache_queries",
     "vllm:prefix_cache_hits",
     "vllm:num_requests_running",
@@ -229,7 +230,11 @@ class NFRCollector:
         out["vllm_prefix_cache_hit_rate"] = round(h / q, 4) if q > 0 else None
 
         # Gauges (max over the run window - read at end-of-run)
-        out["vllm_gpu_cache_usage_max"] = _max(after, "vllm:gpu_cache_usage_perc")
+        # vLLM 0.12 renamed gpu_cache_usage_perc to kv_cache_usage_perc.
+        kv_usage = _max(after, "vllm:kv_cache_usage_perc")
+        out["vllm_gpu_cache_usage_max"] = (
+            kv_usage if kv_usage is not None else _max(after, "vllm:gpu_cache_usage_perc")
+        )
         out["vllm_num_requests_running_max"] = _max(after, "vllm:num_requests_running")
         out["vllm_num_requests_waiting_max"] = _max(after, "vllm:num_requests_waiting")
 

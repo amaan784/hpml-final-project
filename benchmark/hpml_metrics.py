@@ -78,8 +78,13 @@ def _gauge(text: str, metric: str) -> float | None:
 
 
 # nvidia-smi via SSH
-def _nvidia_smi(ssh_prefix: str | None) -> dict[str, float]:
-    query = "nvidia-smi --query-gpu=memory.used,memory.free,memory.total,utilization.gpu --format=csv,noheader,nounits"
+def _nvidia_smi(ssh_prefix: str | None) -> dict[str, float | None]:
+    # clocks.sm / power.draw record whether LOCK_GPU_CLOCK held for the run.
+    # Note: vLLM reserves a fixed share of the GPU at startup, so memory.used
+    # stays ~constant across variants; weight/KV evidence comes from
+    # scripts/vram_evidence.py, not from this total.
+    query = ("nvidia-smi --query-gpu=memory.used,memory.free,memory.total,utilization.gpu,"
+             "clocks.sm,power.draw --format=csv,noheader,nounits")
 
     # prepend ssh when scraping metrics through a bastion/host alias
     if ssh_prefix:
@@ -87,13 +92,31 @@ def _nvidia_smi(ssh_prefix: str | None) -> dict[str, float]:
     else:
         cmd = shlex.split(query)
     out = subprocess.check_output(cmd, text=True, timeout=30).strip().splitlines()
-    used, free, total, util = (float(x.strip()) for x in out[0].split(","))
+    fields = [x.strip() for x in out[0].split(",")]
+
+    def _num(i: int) -> float | None:
+        try:
+            return float(fields[i])
+        except (IndexError, ValueError):  # "[N/A]" on some drivers
+            return None
+
     return {
-        "vram_used_mib": used,
-        "vram_free_mib": free,
-        "vram_total_mib": total,
-        "gpu_util_pct": util,
+        "vram_used_mib": _num(0) or 0.0,
+        "vram_free_mib": _num(1) or 0.0,
+        "vram_total_mib": _num(2) or 0.0,
+        "gpu_util_pct": _num(3) or 0.0,
+        "sm_clock_mhz": _num(4),
+        "power_draw_w": _num(5),
     }
+
+
+def _ratio(num: float | None, den: float | None) -> float | str:
+    return round(num / den, 4) if num is not None and den else ""
+
+
+def _show(value, unit: str = "") -> str:
+    # Pretty-print helper: values that were not recorded show as "-".
+    return "-" if value in ("", None) else f"{value}{unit}"
 
 
 # Aggregate from summary.csv
@@ -121,6 +144,14 @@ def _summary_for_variant(variant: str) -> dict[str, float]:
             if r.get("e2e_ms_iqr") not in (None, "")]
     repeats_vals = [int(r["e2e_ms_repeats"]) for r in ok_rows
                     if r.get("e2e_ms_repeats") not in (None, "") and int(r["e2e_ms_repeats"]) > 0]
+    kv_peaks = [float(r["kv_cache_usage_peak"]) for r in ok_rows
+                if r.get("kv_cache_usage_peak") not in (None, "")]
+    n_cold = sum(1 for r in rows if str(r.get("cold_cache", "")).strip() == "1")
+    # Single-stream decode speed: answer tokens per second of request time.
+    # Replaces the post-run Prometheus window, which saw an idle server (0).
+    tok_ms = [(float(r["completion_tokens"]), float(r["e2e_ms"])) for r in ok_rows
+              if r.get("completion_tokens") not in (None, "")]
+    total_s = sum(ms for _, ms in tok_ms) / 1000
     return {
         "n_scenarios": len(rows),
         "n_e2e_valid": len(e2e),
@@ -131,25 +162,36 @@ def _summary_for_variant(variant: str) -> dict[str, float]:
         # 0.0 here means the harness was run in single-shot mode (--repeats 1).
         "e2e_iqr_med_ms": sorted(iqrs)[len(iqrs) // 2] if iqrs else 0.0,
         "e2e_repeats_min": min(repeats_vals) if repeats_vals else 0,
+        # Peak KV-cache use of any single request (sampled during warm-up).
+        "kv_cache_usage_peak_pct": round(max(kv_peaks) * 100, 2) if kv_peaks else "",
+        "n_cold_cache": n_cold,
+        "decode_tok_per_s": (round(sum(t for t, _ in tok_ms) / total_s, 2)
+                             if tok_ms and total_s > 0 else ""),
     }
 
 
 # Main
 HPML_FIELDS = [
     "variant", "ts",
-    # VRAM
+    # VRAM (nvidia-smi total; ~constant across variants, see _nvidia_smi)
     "vram_used_mib", "vram_free_mib", "gpu_util_pct",
-    # Latency (vLLM histograms)
+    # GPU clock and power at collection time (shows whether the lock held)
+    "sm_clock_mhz", "power_draw_w",
+    # Latency (vLLM histograms; TTFT buckets are coarse, e.g. 250/500/1000 ms)
     "ttft_ms_p50", "ttft_ms_p95",
     "itl_ms_p50",
     # Throughput
     "prompt_tokens_total", "generation_tokens_total",
-    "throughput_tok_per_s",
-    # KV cache
-    "gpu_cache_usage_pct",
+    "throughput_tok_per_s",      # post-run window: ~0 once the harness is done
+    "decode_tok_per_s",          # single-stream answer tokens/s (from summary.csv)
+    # KV cache / memory pressure
+    "gpu_cache_usage_pct",       # end-of-run snapshot (idle, so ~0)
+    "kv_cache_usage_peak_pct",   # peak per-request KV use, sampled during warm-up
+    "num_preemptions",           # requests evicted for lack of KV memory (0 = none)
+    "prefix_cache_hit_rate",     # low under the cold-cache protocol
     # E2E aggregate (from summary.csv)
     "n_scenarios", "n_e2e_valid", "e2e_mean_ms", "e2e_p50_ms", "e2e_max_ms",
-    "e2e_iqr_med_ms", "e2e_repeats_min",
+    "e2e_iqr_med_ms", "e2e_repeats_min", "n_cold_cache",
     # NOTE: ``accuracy`` removed 2026-05-07 -- comes from llm_judge.csv now.
 ]
 
@@ -202,13 +244,27 @@ def main() -> int:
         "vram_used_mib": round(nvm["vram_used_mib"], 1),
         "vram_free_mib": round(nvm["vram_free_mib"], 1),
         "gpu_util_pct": round(nvm["gpu_util_pct"], 1),
+        "sm_clock_mhz": nvm["sm_clock_mhz"] if nvm["sm_clock_mhz"] is not None else "",
+        "power_draw_w": nvm["power_draw_w"] if nvm["power_draw_w"] is not None else "",
         "ttft_ms_p50": round((_hist_quantile(text2, "vllm:time_to_first_token_seconds", 0.5) or 0) * 1000, 2),
         "ttft_ms_p95": round((_hist_quantile(text2, "vllm:time_to_first_token_seconds", 0.95) or 0) * 1000, 2),
-        "itl_ms_p50": round((_hist_quantile(text2, "vllm:time_per_output_token_seconds", 0.5) or 0) * 1000, 2),
+        # vLLM's V1 engine renamed time_per_output_token_seconds to
+        # inter_token_latency_seconds; the old name alone read 0 on vLLM 0.19.
+        "itl_ms_p50": round((_hist_quantile(text2, "vllm:inter_token_latency_seconds", 0.5)
+                             or _hist_quantile(text2, "vllm:time_per_output_token_seconds", 0.5)
+                             or 0) * 1000, 2),
         "prompt_tokens_total": int(_counter(text2, "vllm:prompt_tokens") or 0),
         "generation_tokens_total": int(gen_tok_2),
         "throughput_tok_per_s": round(throughput, 2),
-        "gpu_cache_usage_pct": round((_gauge(text2, "vllm:gpu_cache_usage_perc") or 0) * 100, 2),
+        # vllm:gpu_cache_usage_perc was removed in vLLM 0.12 (renamed
+        # kv_cache_usage_perc); the old name alone read 0 on vLLM 0.19.
+        "gpu_cache_usage_pct": round((_gauge(text2, "vllm:kv_cache_usage_perc")
+                                      or _gauge(text2, "vllm:gpu_cache_usage_perc")
+                                      or 0) * 100, 2),
+        # Cumulative since this variant's server started (one server per variant).
+        "num_preemptions": int(_counter(text2, "vllm:num_preemptions") or 0),
+        "prefix_cache_hit_rate": _ratio(_counter(text2, "vllm:prefix_cache_hits"),
+                                        _counter(text2, "vllm:prefix_cache_queries")),
         **{k: round(v, 3) if isinstance(v, float) else v for k, v in summary.items()},
     }
 
@@ -219,9 +275,15 @@ def main() -> int:
     print(f"  TTFT  (p50 / p95)         {row['ttft_ms_p50']:.1f} / {row['ttft_ms_p95']:.1f} ms")
     print(f"  ITL   (p50)               {row['itl_ms_p50']:.1f} ms/tok")
     print(f"  Throughput                {row['throughput_tok_per_s']:.1f} tok/s   (delta over {args.measurement_window_s:.0f}s)")
-    print(f"  KV cache usage            {row['gpu_cache_usage_pct']:.1f}%")
+    print(f"  KV cache peak (warm-up)   {_show(row.get('kv_cache_usage_peak_pct'), '%')}   "
+          f"preemptions={row['num_preemptions']}   "
+          f"prefix-cache hit rate={_show(row.get('prefix_cache_hit_rate'))}")
+    print(f"  GPU clock / power         {_show(row.get('sm_clock_mhz'), ' MHz')} / "
+          f"{_show(row.get('power_draw_w'), ' W')}")
+    print(f"  Decode speed              {_show(row.get('decode_tok_per_s'), ' tok/s')} (single stream)")
     print(f"  E2E   (mean / p50 / max)  {row.get('e2e_mean_ms', 0):.0f} / {row.get('e2e_p50_ms', 0):.0f} / {row.get('e2e_max_ms', 0):.0f} ms")
     print(f"  E2E   (median IQR)        {row.get('e2e_iqr_med_ms', 0):.0f} ms across {row.get('e2e_repeats_min', 0)}+ repeats/scenario")
+    print(f"  cold-cache scenarios      {row.get('n_cold_cache', 0)}/{row.get('n_scenarios', 0)}")
     print(f"  scenarios                 {row.get('n_e2e_valid', 0)}/{row.get('n_scenarios', 0)} (accuracy via llm_judge.csv)")
 
     # Append to wide CSV. Migrate a legacy-schema file first so the new
