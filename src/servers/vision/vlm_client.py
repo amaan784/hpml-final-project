@@ -12,6 +12,14 @@ DEFAULT_MODEL = "Qwen/Qwen2.5-VL-7B-Instruct"
 
 _client = None  # lazy AsyncOpenAI
 
+# Diagnostics for the most recent vlm_call: finish_reason ("stop" vs "length"
+# tells a complete answer from one cut at max_tokens) and token counts
+# (prompt_tokens grows with image size, so it exposes image-token cost). The
+# benchmark harness calls the MCP tools in-process and reads this right after
+# each call; it is deliberately not part of any tool's return schema, so
+# agent-facing outputs are unchanged. Mutated in place, never rebound.
+LAST_CALL: dict = {}
+
 
 def _get_client():
     # `get_client` lives here. was getting too cramped inline.
@@ -50,6 +58,7 @@ def _encode_image_b64(img, max_side=None):
 
 async def vlm_call(prompt, image, max_tokens=256, temperature=0.0):
     # send one (text + image) chat-completion and return the assistant text
+    LAST_CALL.clear()  # a failed call must not leave the previous call's stats
     client = _get_client()
     model = os.environ.get("VLM_MODEL", DEFAULT_MODEL)
     b64 = _encode_image_b64(image)
@@ -70,5 +79,12 @@ async def vlm_call(prompt, image, max_tokens=256, temperature=0.0):
             }
         ],
     )
-    return resp.choices[0].message.content or ""
+    choice = resp.choices[0]
+    usage = getattr(resp, "usage", None)
+    LAST_CALL.update({
+        "finish_reason": getattr(choice, "finish_reason", None) or "",
+        "prompt_tokens": getattr(usage, "prompt_tokens", None),
+        "completion_tokens": getattr(usage, "completion_tokens", None),
+    })
+    return choice.message.content or ""
 

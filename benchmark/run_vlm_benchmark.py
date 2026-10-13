@@ -83,7 +83,100 @@ def _percentile(sorted_vals: list[float], q: float) -> float:
     return sorted_vals[rank]
 
 
-async def _run_scenario(scenario: dict, repeats: int, warmup: int) -> dict:
+# Cold-cache protocol. vLLM's V1 engine enables prefix caching by default, so
+# after the warm-up call the scenario's whole prompt (image included) is cached
+# and repeated timed calls would skip image encoding and most of prefill. A
+# real inspection image is always new, so every timed call starts from cleared
+# caches instead. These are vLLM dev-mode endpoints (VLLM_SERVER_DEV_MODE=1,
+# set by serve_and_bench.sh and serve_vllm.sh). Only the prefix-cache reset is
+# required; the multimodal-processor and encoder-cache resets are newer and
+# are used when the server exposes them.
+_CACHE_RESET_ENDPOINTS = ("/reset_prefix_cache", "/reset_mm_cache", "/reset_encoder_cache")
+_REQUIRED_RESET = "/reset_prefix_cache"
+_unavailable_endpoints: set[str] = set()
+
+# KV-cache usage gauge: current name first, then the pre-0.12 name.
+_KV_USAGE_METRICS = ("vllm:kv_cache_usage_perc", "vllm:gpu_cache_usage_perc")
+
+
+def _server_root(base_url: str | None = None) -> str:
+    # VLM_BASE_URL points at the OpenAI API (".../v1"); vLLM's admin and
+    # /metrics endpoints live at the server root.
+    base = (base_url or os.environ.get("VLM_BASE_URL", vlm_client.DEFAULT_BASE_URL)).rstrip("/")
+    return base[: -len("/v1")] if base.endswith("/v1") else base
+
+
+def _reset_server_caches() -> bool:
+    """Clear vLLM's caches before a timed call; True if the prefix cache was cleared."""
+    import requests
+
+    cleared_prefix = False
+    for endpoint in _CACHE_RESET_ENDPOINTS:
+        if endpoint in _unavailable_endpoints:
+            continue
+        try:
+            resp = requests.post(_server_root() + endpoint, timeout=10)
+        except Exception as exc:  # noqa: BLE001
+            print(f"    [warn] {endpoint} failed: {exc}", flush=True)
+            continue
+        if resp.status_code in (404, 405):
+            # Not exposed: dev mode is off, or this vLLM predates the endpoint.
+            _unavailable_endpoints.add(endpoint)
+            if endpoint == _REQUIRED_RESET:
+                print(f"    [ERROR] {endpoint} not available (HTTP {resp.status_code}); timed "
+                      f"calls will hit warm caches. Is VLLM_SERVER_DEV_MODE=1 set on the "
+                      f"server?", flush=True)
+            else:
+                print(f"    [info] {endpoint} not available; skipping it", flush=True)
+            continue
+        ok = resp.status_code == 200
+        try:
+            body = resp.json()
+            if isinstance(body, dict) and body.get("success") is False:
+                ok = False
+        except ValueError:
+            pass  # empty or non-JSON 200 body counts as success
+        if endpoint == _REQUIRED_RESET:
+            cleared_prefix = ok
+    return cleared_prefix
+
+
+def _kv_cache_usage(metrics_text: str) -> float | None:
+    # Current KV-cache usage (0-1) from a /metrics scrape, max over label sets.
+    values = []
+    for line in metrics_text.splitlines():
+        if line.startswith(_KV_USAGE_METRICS):
+            try:
+                values.append(float(line.rsplit(" ", 1)[1]))
+            except (IndexError, ValueError):
+                pass
+    return max(values) if values else None
+
+
+async def _sample_kv_usage_peak(stop: asyncio.Event, interval_s: float = 0.25) -> float | None:
+    # Poll /metrics until `stop` is set; return the peak KV-cache usage seen.
+    import requests
+
+    url = _server_root() + "/metrics"
+    peak: float | None = None
+    while True:
+        try:
+            text = await asyncio.to_thread(lambda: requests.get(url, timeout=2).text)
+            usage = _kv_cache_usage(text)
+            if usage is not None:
+                peak = usage if peak is None else max(peak, usage)
+        except Exception:  # noqa: BLE001
+            pass
+        if stop.is_set():
+            return peak
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=interval_s)
+        except asyncio.TimeoutError:
+            pass
+
+
+async def _run_scenario(scenario: dict, repeats: int, warmup: int,
+                        reset_caches: bool = True) -> dict:
     """Run one scenario directly through the vision MCP tool functions.
 
     We skip the planner LLM because each scenario already names the tool to
@@ -92,7 +185,9 @@ async def _run_scenario(scenario: dict, repeats: int, warmup: int) -> dict:
 
     Each scenario is timed ``repeats`` times after ``warmup`` discarded calls;
     ``e2e_ms`` is the median, ``e2e_ms_iqr`` is P75 - P25 (single-shot mode is
-    ``repeats=1 warmup=0`` and the IQR collapses to 0).
+    ``repeats=1 warmup=0`` and the IQR collapses to 0). With ``reset_caches``
+    every timed call starts from cleared vLLM caches (``cold_cache`` = 1 when
+    all resets succeeded); the first warm-up call samples peak KV-cache use.
 
     Returns the per-scenario row WITHOUT a ``correct`` field -- accuracy
     grading happens post-hoc via ``benchmark/llm_judge.py`` against the
@@ -104,31 +199,47 @@ async def _run_scenario(scenario: dict, repeats: int, warmup: int) -> dict:
     args.update(scenario.get("tool_args_extra", {}))
 
     # Discard warm-up timings (first call after model swap or cache flush is
-    # ~2x slower on the L4; otherwise it pollutes the median).
-    for _ in range(max(0, warmup)):
-        await vision_main.mcp.call_tool(tool_name, args)
+    # ~2x slower on the L4; otherwise it pollutes the median). The first
+    # warm-up call also samples KV-cache usage, so the per-request footprint
+    # is measured without polling /metrics during the timed calls.
+    kv_peak: float | None = None
+    for i in range(max(0, warmup)):
+        if i == 0:
+            stop = asyncio.Event()
+            sampler = asyncio.create_task(_sample_kv_usage_peak(stop))
+            try:
+                await vision_main.mcp.call_tool(tool_name, args)
+            finally:
+                stop.set()
+                kv_peak = await sampler
+        else:
+            await vision_main.mcp.call_tool(tool_name, args)
 
     samples_ms: list[float] = []
-    contents = None
+    texts: list[str] = []
+    payload: dict = {}
+    cold = reset_caches
     for _ in range(max(1, repeats)):
+        if reset_caches:
+            # Outside the timed region; a failed reset marks the row warm.
+            cold = _reset_server_caches() and cold
         t0 = time.perf_counter()
         contents, _ = await vision_main.mcp.call_tool(tool_name, args)
         samples_ms.append((time.perf_counter() - t0) * 1000)
+        payload = json.loads(contents[0].text)
+        # Different vision tools name the response field differently:
+        #   analyze_image       -> 'answer'
+        #   classify_equipment, detect_visual_defects, assess_condition, read_gauge -> 'raw_response'
+        texts.append(payload.get("raw_response") or payload.get("answer") or "")
+    # Token counts / finish_reason of the last timed call (greedy decoding, so
+    # every repeat should match -- n_distinct_outputs checks that).
+    call_stats = dict(vlm_client.LAST_CALL)
 
     samples_sorted = sorted(samples_ms)
     median_ms = _percentile(samples_sorted, 0.5)
     p25 = _percentile(samples_sorted, 0.25)
     p75 = _percentile(samples_sorted, 0.75)
 
-    payload = json.loads(contents[0].text)
-    # Different vision tools name the response field differently:
-    #   analyze_image       -> 'answer'
-    #   classify_equipment, detect_visual_defects, assess_condition, read_gauge -> 'raw_response'
-    response_text = (
-        payload.get("raw_response")
-        or payload.get("answer")
-        or ""
-    )
     return {
         "scenario_id": scenario["id"],
         "category": scenario["category"],
@@ -139,18 +250,29 @@ async def _run_scenario(scenario: dict, repeats: int, warmup: int) -> dict:
         "e2e_ms_min": round(samples_sorted[0], 2),
         "e2e_ms_max": round(samples_sorted[-1], 2),
         "e2e_ms_repeats": len(samples_sorted),
+        "finish_reason": call_stats.get("finish_reason", ""),
+        "prompt_tokens": call_stats.get("prompt_tokens"),
+        "completion_tokens": call_stats.get("completion_tokens"),
+        "n_distinct_outputs": len(set(texts)),
+        "kv_cache_usage_peak": round(kv_peak, 4) if kv_peak is not None else None,
+        "cold_cache": int(cold),
         "error": payload.get("error", ""),
-        "raw_response": response_text[:1500],
+        # Full text, never truncated: the judge grades this field, and a cut
+        # here (previously 1500 chars, while analyze_image allows 768 tokens
+        # ~= 3000 chars) graded some answers on partial text.
+        "raw_response": texts[-1],
     }
 
 
-async def _run_all(scenarios: list[dict], repeats: int, warmup: int) -> list[dict]:
+async def _run_all(scenarios: list[dict], repeats: int, warmup: int,
+                   reset_caches: bool = True) -> list[dict]:
     # Run scenarios serially so stdout + exception traces stay human-readable.
     rows = []
     for sc in scenarios:
         print(f"  -> #{sc['id']} {sc['category']}", flush=True)
         try:
-            row = await _run_scenario(sc, repeats=repeats, warmup=warmup)
+            row = await _run_scenario(sc, repeats=repeats, warmup=warmup,
+                                      reset_caches=reset_caches)
         except Exception as exc:  # noqa: BLE001
             row = {
                 "scenario_id": sc["id"],
@@ -162,6 +284,12 @@ async def _run_all(scenarios: list[dict], repeats: int, warmup: int) -> list[dic
                 "e2e_ms_min": -1,
                 "e2e_ms_max": -1,
                 "e2e_ms_repeats": 0,
+                "finish_reason": "",
+                "prompt_tokens": None,
+                "completion_tokens": None,
+                "n_distinct_outputs": 0,
+                "kv_cache_usage_peak": None,
+                "cold_cache": 0,
                 "error": f"runner_exception: {exc}",
                 "raw_response": "",
             }
@@ -179,14 +307,17 @@ def _scrape_vllm_metrics(base_url: str) -> dict[str, Any]:
     # Prometheus scrape is optional — dev laptops often lack a running vLLM.
     try:
         import requests
-        url = base_url.rstrip("/v1") + "/metrics"
+        url = _server_root(base_url) + "/metrics"
         resp = requests.get(url, timeout=2)
         resp.raise_for_status()
         wanted_prefixes = (
             "vllm:prompt_tokens_total",
             "vllm:generation_tokens_total",
-            "vllm:gpu_cache_usage_perc",
-            "vllm:prefix_cache_hit_rate",
+            "vllm:kv_cache_usage_perc",
+            "vllm:gpu_cache_usage_perc",      # pre-0.12 name of the gauge above
+            "vllm:num_preemptions",
+            "vllm:prefix_cache_queries",
+            "vllm:prefix_cache_hits",
             "vllm:time_to_first_token_seconds",
         )
         out: dict[str, float] = {}
@@ -215,8 +346,14 @@ CSV_FIELDS = [
     "e2e_ms_min",
     "e2e_ms_max",
     "e2e_ms_repeats",
+    "finish_reason",     # "stop" = complete answer; "length" = cut at max_tokens
+    "prompt_tokens",     # text + image tokens; tracks image size per variant
+    "completion_tokens", # answer length in tokens (decode cost)
+    "n_distinct_outputs",# distinct answers across timed repeats (1 = deterministic)
+    "kv_cache_usage_peak",# peak KV-cache use (0-1) during the first warm-up call
+    "cold_cache",        # 1 = vLLM caches cleared before every timed call
     "error",
-    "raw_response",
+    "raw_response",      # full answer text (no truncation)
     # `correct` (auto-scorer output) was removed 2026-05-07 -- accuracy now
     # comes from results/llm_judge.csv (post-hoc, via benchmark/llm_judge.py).
     # `characteristic_form` (rubric text) is dropped from CSV -- it bloats
@@ -266,6 +403,11 @@ def main() -> int:
                               "(default 1). Bypasses the first-call cold path."))
     parser.add_argument("--seed", type=int, default=42,
                         help="Seed for random/numpy/torch/cudnn (see benchmark/seeding.py).")
+    parser.add_argument("--warm-cache", action="store_true",
+                        help=("Do NOT clear vLLM's caches before each timed call. "
+                              "Measures repeat-request latency with the prompt "
+                              "already cached; the default clears them so every "
+                              "timed call is cold, like a new inspection image."))
     args = parser.parse_args()
 
     # Seed BEFORE the harness touches torch / vLLM client state. The vLLM
@@ -312,9 +454,15 @@ def main() -> int:
     print(f"==> VLM_MODEL:    {os.environ['VLM_MODEL']}")
     print(f"==> image_max:    {variant.image_max_side}")
     print(f"==> Scenarios:    {len(scenarios)}  "
-          f"(seed={args.seed}, repeats={args.repeats}, warmup={args.warmup})")
+          f"(seed={args.seed}, repeats={args.repeats}, warmup={args.warmup}, "
+          f"cache={'warm' if args.warm_cache else 'cold (reset before each timed call)'})")
 
-    rows = asyncio.run(_run_all(scenarios, repeats=args.repeats, warmup=args.warmup))
+    rows = asyncio.run(_run_all(scenarios, repeats=args.repeats, warmup=args.warmup,
+                                reset_caches=not args.warm_cache))
+    n_warm = sum(1 for r in rows if not r.get("cold_cache"))
+    if not args.warm_cache and n_warm:
+        print(f"==> WARNING: {n_warm}/{len(rows)} scenarios were timed WITHOUT a cache "
+              f"reset (see cold_cache in summary.csv)")
     metrics = _scrape_vllm_metrics(
         os.environ.get("VLM_BASE_URL", vlm_client.DEFAULT_BASE_URL)
     )
