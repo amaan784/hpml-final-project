@@ -16,6 +16,8 @@ Usage:
   python scripts/report_numbers.py --section readme
   python scripts/report_numbers.py --section report
   python scripts/report_numbers.py --section slides
+  python scripts/report_numbers.py --section extra    # L2 ablation + L3 sweep
+  python scripts/report_numbers.py --section health   # cut-off / empty / nondeterministic answers
   python scripts/report_numbers.py --json         # machine-readable dump
 """
 
@@ -34,6 +36,7 @@ RESULTS = REPO / "results"
 HPML_CSV = RESULTS / "hpml_metrics.csv"
 JUDGE_CSV = RESULTS / "llm_judge.csv"
 ACCURACY_CANONICAL = RESULTS / "accuracy_canonical.csv"
+SUMMARY_CSV = RESULTS / "summary.csv"
 
 PASS_THRESHOLD = 4  # score >= 4 counts as pass; matches benchmark/llm_judge.py default
 
@@ -231,6 +234,97 @@ def _section_report(hpml: dict, acc: dict) -> str:
     return "\n".join(lines)
 
 
+def _load_health() -> dict[str, dict]:
+    """Per-variant answer health from summary.csv (latest row per scenario).
+
+    Separates failures the judge cannot distinguish: harness errors, empty
+    answers, answers cut at the token cap (finish_reason == "length"), and
+    scenarios whose timed repeats disagreed. Columns added by the
+    reproducibility rework are blank on older rows and reported as "-".
+    """
+    if not SUMMARY_CSV.exists():
+        return {}
+    latest: dict[tuple[str, str], dict] = {}
+    with SUMMARY_CSV.open(encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            if row.get("variant"):
+                latest[(row["variant"], row.get("scenario_id", ""))] = row
+    out: dict[str, dict] = {}
+    for (v, _sid), row in latest.items():
+        h = out.setdefault(v, {"n": 0, "errors": 0, "empty": 0,
+                               "cut": 0, "finish_known": 0,
+                               "nondet": 0, "nondet_known": 0,
+                               "cold": 0, "cold_known": 0,
+                               "completion_tokens": [], "prompt_tokens": []})
+        cold = str(row.get("cold_cache") or "").strip()
+        if cold in ("0", "1"):
+            h["cold_known"] += 1
+            h["cold"] += cold == "1"
+        h["n"] += 1
+        if row.get("error") or row.get("e2e_ms") in ("-1", "-1.0"):
+            h["errors"] += 1
+        if not (row.get("raw_response") or "").strip():
+            h["empty"] += 1
+        finish = row.get("finish_reason") or ""
+        if finish:
+            h["finish_known"] += 1
+            h["cut"] += finish == "length"
+        distinct = row.get("n_distinct_outputs") or ""
+        if distinct not in ("", "0"):
+            h["nondet_known"] += 1
+            h["nondet"] += int(distinct) > 1
+        for k in ("completion_tokens", "prompt_tokens"):
+            try:
+                h[k].append(int(float(row.get(k) or "")))
+            except ValueError:
+                pass
+    return out
+
+
+def _median_str(xs: list[int]) -> str:
+    return str(sorted(xs)[len(xs) // 2]) if xs else "-"
+
+
+def _section_health(health: dict) -> str:
+    lines = ["== Answer health (wrong answer vs no usable answer) ==", ""]
+    if not health:
+        lines.append(f"  (no {SUMMARY_CSV.name} found)")
+        return "\n".join(lines)
+    width = max(len(v) for v in health)
+    lines.append(f"  {'variant':<{width}}  {'n':>3}  {'errors':>6}  {'empty':>5}  "
+                 f"{'cut@cap':>7}  {'nondet':>6}  {'cold':>6}  {'med out tok':>11}  "
+                 f"{'med prompt tok':>14}")
+    for v in sorted(health):
+        h = health[v]
+        cut = f"{h['cut']}/{h['finish_known']}" if h["finish_known"] else "-"
+        nondet = f"{h['nondet']}/{h['nondet_known']}" if h["nondet_known"] else "-"
+        cold = f"{h['cold']}/{h['cold_known']}" if h["cold_known"] else "-"
+        lines.append(f"  {v:<{width}}  {h['n']:>3}  {h['errors']:>6}  {h['empty']:>5}  "
+                     f"{cut:>7}  {nondet:>6}  {cold:>6}  {_median_str(h['completion_tokens']):>11}  "
+                     f"{_median_str(h['prompt_tokens']):>14}")
+    lines.append("")
+    lines.append("  cut@cap: answers that hit max_tokens (finish_reason=length).")
+    lines.append("  nondet:  scenarios whose timed repeats gave more than one distinct answer.")
+    lines.append("  cold:    scenarios timed with vLLM's caches cleared before every call.")
+    lines.append("  '-':     not recorded (rows from before the harness logged it).")
+    return "\n".join(lines)
+
+
+def _section_extra(hpml: dict, acc: dict) -> str:
+    extra = sorted((set(hpml) | set(acc)) - set(REPORT_VARIANT_ORDER))
+    lines = ["== L2 ablation and L3 resolution sweep (not in Table II) ==", ""]
+    if not extra:
+        lines.append("  (none in results/ yet)")
+        return "\n".join(lines)
+    width = max(len(v) for v in extra)
+    lines.append(f"  {'variant':<{width}}  {'e2e_mean':>10}  {'p50':>8}  {'accuracy':>34}")
+    for v in extra:
+        h = hpml.get(v, {})
+        lines.append(f"  {v:<{width}}  {h.get('e2e_mean_ms', 0):>8.0f}ms  "
+                     f"{h.get('e2e_p50_ms', 0):>6.0f}ms  {_fmt_acc(acc.get(v)):>34}")
+    return "\n".join(lines)
+
+
 def _section_slides(hpml: dict, acc: dict) -> str:
     qwen_l0 = hpml.get("L0_baseline", {})
     qwen_l1d = hpml.get("L1_awq_w4a16_domain", {})
@@ -268,7 +362,8 @@ def _section_slides(hpml: dict, acc: dict) -> str:
 
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    p.add_argument("--section", choices=["readme", "report", "slides", "all"],
+    p.add_argument("--section",
+                   choices=["readme", "report", "extra", "health", "slides", "all"],
                    default="all")
     p.add_argument("--json", action="store_true",
                    help="Machine-readable dump (overrides --section).")
@@ -286,17 +381,23 @@ def main() -> int:
         print(f"WARN: no accuracy data ({JUDGE_CSV} or {ACCURACY_CANONICAL}).",
               file=sys.stderr)
 
+    health = _load_health()
+
     if args.json:
-        json.dump({"hpml": hpml, "accuracy": acc}, sys.stdout, indent=2, default=str)
+        json.dump({"hpml": hpml, "accuracy": acc, "health": health},
+                  sys.stdout, indent=2, default=str)
         sys.stdout.write("\n")
         return 0
 
     sections = {
         "readme": lambda: _section_readme(hpml, acc),
         "report": lambda: _section_report(hpml, acc),
+        "extra": lambda: _section_extra(hpml, acc),
+        "health": lambda: _section_health(health),
         "slides": lambda: _section_slides(hpml, acc),
     }
-    order = ["readme", "report", "slides"] if args.section == "all" else [args.section]
+    order = (["readme", "report", "extra", "health", "slides"]
+             if args.section == "all" else [args.section])
     for i, name in enumerate(order):
         if i:
             print()
