@@ -1,14 +1,13 @@
 # Tests for the optimization-variant registry.
-# Locked to the 10-variant final sweep (5 Qwen + 5 Llama).
-# Cut variants (W8A8, ablations, extra L3 resolutions) are parked in _unused/.
+# 10 core variants (5 Qwen + 5 Llama) plus the L2 FP8 ablation and the
+# L3 resolution sweep added after the external review.
 
 import pytest
 
 from benchmark import variants
 
 
-# 10 active variants: 5 per family
-KNOWN_NAMES = {
+CORE_NAMES = {
     # Qwen track
     "L0_baseline",
     "L1_awq_w4a16_domain",
@@ -22,6 +21,25 @@ KNOWN_NAMES = {
     "L2_llama_full_bundle",
     "L3_llama_image_512",
 }
+
+L2_ABLATION_NAMES = {
+    "L2_fp8_kv",
+    "L2_fp8_kv_dynamic_scales",
+    "L2_fp8_kv_no_prefix_cache",
+    "L2_full_bundle_dynamic_scales",
+    "L2_llama_fp8_kv",
+}
+
+L3_SWEEP_NAMES = {
+    "L3_image_256",
+    "L3_image_384",
+    "L3_image_768",
+    "L3_llama_image_256",
+    "L3_llama_image_384",
+    "L3_llama_image_768",
+}
+
+KNOWN_NAMES = CORE_NAMES | L2_ABLATION_NAMES | L3_SWEEP_NAMES
 
 
 class TestRegistry:
@@ -120,13 +138,54 @@ class TestVariantShape:
                      "--kv-cache-dtype", "--gpu-memory-utilization"):
             assert flag in flags, f"L2_llama_full_bundle missing {flag}"
 
-    def test_l3_only_512_kept(self):
-        # only 512 is kept in the active set (768/1024/1536 parked in _unused)
-        sides = {v.image_max_side for v in variants.by_family("L3")}
-        assert sides == {512}
+    def test_l3_sweep_sides(self):
+        # 256/384/512/768 on both families; 1024 is the L0 baseline cap
+        for family_filter in (lambda n: "llama" not in n, lambda n: "llama" in n):
+            sides = {v.image_max_side for v in variants.by_family("L3")
+                     if family_filter(v.name)}
+            assert sides == {256, 384, 512, 768}
+
+    def test_l3_sweep_only_changes_resolution(self):
+        # sweep points must differ from L0 in image size alone
+        for name in L3_SWEEP_NAMES:
+            v = variants.get(name)
+            assert v.vllm_extra == (), f"{name} must not change serving flags"
+            base = variants.get("L0_llama_baseline" if "llama" in name else "L0_baseline")
+            assert v.model_id == base.model_id
 
     def test_per_family_variant_count(self):
         qwen = [v for v in variants.all_variants() if "llama" not in v.name]
         llama = [v for v in variants.all_variants() if "llama" in v.name]
-        assert len(qwen) == 5, f"Expected 5 Qwen variants, got {len(qwen)}"
-        assert len(llama) == 5, f"Expected 5 Llama variants, got {len(llama)}"
+        assert len(qwen) == 12, f"Expected 12 Qwen variants, got {len(qwen)}"
+        assert len(llama) == 9, f"Expected 9 Llama variants, got {len(llama)}"
+
+
+class TestL2Ablation:
+    def _flags(self, name):
+        return list(variants.get(name).vllm_extra)
+
+    def test_fp8_alone_has_no_other_flags(self):
+        assert self._flags("L2_fp8_kv") == ["--kv-cache-dtype", "fp8"]
+        assert self._flags("L2_llama_fp8_kv") == ["--kv-cache-dtype", "fp8"]
+
+    def test_dynamic_scales_differs_only_by_scale_flag(self):
+        assert self._flags("L2_fp8_kv_dynamic_scales") == \
+            self._flags("L2_fp8_kv") + ["--calculate-kv-scales"]
+
+    def test_no_prefix_cache_differs_only_by_prefix_flag(self):
+        assert self._flags("L2_fp8_kv_no_prefix_cache") == \
+            self._flags("L2_fp8_kv") + ["--no-enable-prefix-caching"]
+
+    def test_bundle_fix_differs_only_by_scale_flag(self):
+        bundle = self._flags("L2_full_bundle")
+        fixed = self._flags("L2_full_bundle_dynamic_scales")
+        assert "--calculate-kv-scales" in fixed
+        assert [f for f in fixed if f != "--calculate-kv-scales"] == bundle
+
+    def test_ablations_use_fp16_base_weights(self):
+        # ablations isolate serving flags; they must not swap the checkpoint
+        for name in L2_ABLATION_NAMES:
+            v = variants.get(name)
+            base = variants.get("L0_llama_baseline" if "llama" in name else "L0_baseline")
+            assert v.model_id == base.model_id
+            assert v.image_max_side == base.image_max_side

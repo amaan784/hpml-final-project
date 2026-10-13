@@ -13,7 +13,10 @@ register(Variant(
     image_max_side=512,
     requires=("Nothing extra; vlm_client honors VLM_IMAGE_MAX_SIDE at request time.",),
     how_it_works=(
-        "512px cap cuts vision tokens ~4x vs 1024; faster, less detail.",
+        "Changes only the 11 scenario images larger than 512 px (transformers "
+        "and turbines); for those, Qwen's dynamic resolution cuts visual "
+        "tokens ~4x vs the 1024 px cap. Pump (512 px) and motor (320 px) "
+        "requests are byte-identical to L0."
     ),
     howto_test=(
         "MODEL=Qwen/Qwen2.5-VL-7B-Instruct bash scripts/serve_vllm.sh\n"
