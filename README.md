@@ -38,7 +38,7 @@ The final report PDF and the presentation file are checked into the `deliverable
 
 AssetOpsBench (AAAI 2026) covers 141 industrial AI scenarios across text and time series modalities, but it has no vision component. That gap matters in practice because many failure modes (corrosion, ice buildup, bearing damage, casting defects, transformer hot spots) are visible long before sensor data flags them. The natural way to close the gap is to bring a vision language model into the AssetOpsBench agent loop, but doing that on commodity hardware is expensive. At FP16, Llama 3 LLaVA NeXT 8B occupies 15.5 GiB of weight VRAM and produces a 9.3 second per query mean latency on a single NVIDIA L4, which leaves almost no key value cache headroom for batched multi agent workloads.
 
-A naive INT4 quantization (using a generic calibration corpus) appears faster on average, but it also surfaces a runaway generation failure mode: in the final 22-scenario sweep, two Llama L1g transformer scenarios timed out at the token cap at around 122 seconds, so they were excluded from its judged scenario count (20 scoreable scenarios instead of 22). That kind of tail behavior is unacceptable for industrial deployment.
+A naive INT4 quantization (using a generic calibration corpus) appears faster on average, but it also surfaces a silent failure mode: in the final 22-scenario sweep, two Llama L1g transformer scenarios returned empty answers (generation ended after about one second). An inspection system that silently returns nothing is unacceptable for industrial deployment.
 
 This project targets inference side optimization. We add a vision modality to AssetOpsBench through a VLM powered MCP agent, then we make it cheap and reliable on a single NVIDIA L4 GPU through quantization, calibration regime selection, vLLM serving tuning, and image preprocessing changes.
 
@@ -53,7 +53,7 @@ This project targets inference side optimization. We add a vision modality to As
 * Primary track: `Qwen/Qwen2.5-VL-7B-Instruct` (7B parameters, native ViT vision tower).
 * Cross family baseline: `llava-hf/llama3-llava-next-8b-hf` (Llama 3 8B with the LLaVA NeXT CLIP based vision tower). We originally targeted Llama 3.2 Vision 11B but its 22 GB FP16 footprint left no headroom on the 24 GB L4, so we substituted the 8B variant instead.
 
-**Framework and serving.** vLLM 0.19.0, llmcompressor 0.10.0.2, compressed-tensors 0.14.0.1, transformers 4.57.6, PyTorch 2.10.0+cu129. Agent orchestration uses the [Model Context Protocol](https://modelcontextprotocol.io/). An in process ReAct agent ([`src/agent/react/`](src/agent/react/)) talks to a custom `vision-mcp-server` ([`src/servers/vision/main.py`](src/servers/vision/main.py)) over MCP stdio. The server exposes `vision.analyze_image`, `vision.assess_condition`, and `vision.detect_visual_defects` tools that conform to the AssetOpsBench agent contract. A Plan Execute runner ([`src/agent/plan_execute/`](src/agent/plan_execute/)) is included so we can compare the two agent architectures.
+**Framework and serving.** vLLM 0.19.0, llmcompressor 0.10.0.2, compressed-tensors 0.14.0.1, transformers 4.57.6, PyTorch 2.10.0+cu129. Agent orchestration uses the [Model Context Protocol](https://modelcontextprotocol.io/). An in process ReAct agent ([`src/agent/react/`](src/agent/react/)) talks to a custom `vision-mcp-server` ([`src/servers/vision/main.py`](src/servers/vision/main.py)) over MCP stdio. The server exposes `vision.analyze_image`, `vision.assess_condition`, and `vision.detect_visual_defects` tools that conform to the AssetOpsBench agent contract. A Plan Execute runner ([`src/agent/plan_execute/`](src/agent/plan_execute/)) is included so we can compare the two agent architectures. **The benchmark numbers in this README do not go through either agent:** [`benchmark/run_vlm_benchmark.py`](benchmark/run_vlm_benchmark.py) calls the vision tool directly, one `analyze_image` call per scenario, so reported latency and accuracy measure the VLM serving path, not multi-turn agent behavior.
 
 **Datasets.** Four publicly available industrial image datasets, totaling roughly 10,800 images. Hand authored scenarios live under [`src/scenarios/local/`](src/scenarios/local/).
 
@@ -64,7 +64,7 @@ This project targets inference side optimization. We add a vision modality to As
 | Transformer and substation | HuggingFace 15 class Substation Equipment (YOLO annotated) | 1,660 RGB photos | [`vision_transformer_scenarios.json`](src/scenarios/local/vision_transformer_scenarios.json) (IDs 1, 6, 9, 10, 14, 20) |
 | Wind turbine blade | Blade30 Wind Turbine Blades (defect annotations) | 1,302 drone images | [`vision_turbine_scenarios.json`](src/scenarios/local/vision_turbine_scenarios.json) (IDs 301 to 305) |
 
-The calibration corpus in [`benchmark/calibration.py`](benchmark/calibration.py) provides 128 hand authored substation inspection text prompts for the domain calibration regime. The generic calibration regime pulls 128 samples at runtime from `HuggingFaceH4/ultrachat_200k`.
+The domain calibration corpus in [`benchmark/calibration.py`](benchmark/calibration.py) is 40 unique short substation and transformer sentences, cycled to 128 samples (a few thousand tokens in total). It contains no pump, motor, or turbine text, and a few sentences describe the multi-panel layout of the transformer test images. The generic calibration regime pulls 128 conversations (up to 8,000 characters each) at runtime from `HuggingFaceH4/ultrachat_200k`. Because the two corpora differ in size and variety as well as topic, domain-vs-generic results do not isolate the effect of topic. Calibration is text-only; no images are used.
 
 **Custom layers and modifications.**
 
@@ -97,11 +97,11 @@ The headline numbers come from the final 22-scenario sweep covering all four ass
 | p50 end to end latency | 9,384 ms | 3,136 ms | 2.99x faster |
 | LLM as judge accuracy | 52.3% (23/44) | 40.0% (16/40) | 12.3 pp lower |
 
-For the Llama track, the L1d (domain) variant gives 2.46x mean speedup at 59.1% accuracy (26/44). The Llama family also shows a 2.6x weight VRAM reduction (15.54 GiB to 5.9 GiB) and a 4.7x growth in the key value cache pool (21K to 100K concurrent tokens), sourced from vLLM's `gpu_model_runner` startup logs — parsed into the committed evidence file [`results/vram_breakdown.csv`](results/vram_breakdown.csv) by [`scripts/vram_evidence.py`](scripts/vram_evidence.py) (run automatically during each sweep; `python scripts/vram_evidence.py report` prints the ratios). The L1g scoreable scenario count is 20 (not 22) because two transformer scenarios hit the token cap and produced no response to judge.
+For the Llama track, the L1d (domain) variant gives 2.46x mean speedup at 59.1% accuracy (26/44). The Llama family also shows a 2.6x weight VRAM reduction (15.54 GiB to 5.9 GiB) and a 4.7x growth in the key value cache pool (21K to 100K concurrent tokens), sourced from vLLM's `gpu_model_runner` startup logs — parsed into the committed evidence file [`results/vram_breakdown.csv`](results/vram_breakdown.csv) by [`scripts/vram_evidence.py`](scripts/vram_evidence.py) (run automatically during each sweep; `python scripts/vram_evidence.py report` prints the ratios). The L1g denominator is 40 (not 44) because two transformer scenarios returned empty answers and the original judge skipped them; counting them as failures, as the judge now does, gives 16/44 (36.4%).
 
 **Hardware.** One NVIDIA L4 24 GB on GCP `g2-standard-8`, CUDA 12.9, vLLM 0.19, PyTorch, Ubuntu 22.04.
 
-**Headline result.** AWQ W4A16 quantization with domain matched calibration on Qwen2.5 VL 7B nearly halves mean end to end inference latency (9.44 s to 4.75 s, 1.99x) while improving LLM as judge accuracy from 47.7% to 81.8% on a single L4 GPU. The Qwen and Llama families respond differently to INT4 quantization: Qwen accuracy improves under domain calibration, while Llama accuracy regresses regardless of calibration regime. We discuss this asymmetry in Section 6.
+**Headline result.** AWQ W4A16 quantization with domain calibration on Qwen2.5 VL 7B nearly halves mean end to end inference latency (9.44 s to 4.75 s, 1.99x) on a single L4 GPU. Its LLM as judge pass rate was also higher than the FP16 baseline (81.8% vs 47.7%), but that comparison rests on 22 scenarios and a judge whose repeated passes disagree, so treat it as provisional until the three-pass re-run (Section 6). On Llama, domain calibration slightly raised accuracy (59.1% vs 52.3%) while generic calibration lowered it (40.0%).
 
 ---
 
@@ -113,7 +113,7 @@ For the Llama track, the L1d (domain) variant gives 2.46x mean speedup at 59.1% 
 |-- pyproject.toml                         uv and hatch project, pinned deps and entry points
 |-- uv.lock
 |-- benchmark/                             HPML benchmark harness, variants, evaluation, plots
-|   |-- calibration.py                     128 domain-specific calibration prompts
+|   |-- calibration.py                     domain (40 substation sentences) + generic corpora
 |   |-- compare_agents.py
 |   |-- concurrent_load.py                 L2 throughput stress driver
 |   |-- hpml_metrics.py                    vLLM Prometheus and nvidia-smi scrape
@@ -231,7 +231,9 @@ If a future DLVM image ships with a different default `gcc` major version, insta
 **On the VM, set up the repo and dependencies:**
 
 ```bash
-git clone https://github.com/amaan784/hpml-final-project.git
+# The reproducibility fixes live on this branch until it is merged into main;
+# a plain `git clone` checks out main and would run the old harness.
+git clone -b amaan-changes-postsub-v0 https://github.com/amaan784/hpml-final-project.git
 cd ~/hpml-final-project
 
 # uv (already on the DLVM image; install if missing: `curl -LsSf https://astral.sh/uv/install.sh | sh`)
@@ -312,7 +314,7 @@ All quant scripts now set `random` / `numpy` / `torch` / `cudnn` seeds via [`ben
 
 ### E. Evaluation
 
-The recommended path is the one-command sweep via [`scripts/overnight.sh`](scripts/overnight.sh). It builds any missing AWQ checkpoints, runs all 10 variants end to end, scrapes vLLM Prometheus + nvidia-smi for HPML metrics, runs LLM-as-judge if `OPENAI_API_KEY` is set, generates plots, and uploads a W&B summary. Total wall clock is roughly 6-8 hours on a single L4.
+The recommended path is the one-command sweep via [`scripts/overnight.sh`](scripts/overnight.sh). It builds any missing AWQ checkpoints, runs the 10 core variants plus the L2 FP8 ablation (5 variants) and the L3 resolution sweep (6 variants), scrapes vLLM Prometheus + nvidia-smi for HPML metrics, runs LLM-as-judge if `OPENAI_API_KEY` is set, generates plots, and uploads a W&B summary. The benchmark stage alone takes about 6-7 hours on a single L4 once checkpoints exist; set `RUN_L2_ABLATION=0` or `RUN_L3_SWEEP=0` to skip a group.
 
 ```bash
 cd ~/hpml-final-project
@@ -323,10 +325,12 @@ tmux new -s overnight
 # Inside the tmux session
 cd ~/hpml-final-project
 CLEAN_RESULTS=1 QUANTIZE_MISSING=1 QUANTIZE_LLAMA=1 \
-  bash scripts/overnight.sh 2>&1 | tee results/overnight.log
+  bash scripts/overnight.sh
 
 # Detach with Ctrl-b d. Reattach later with: tmux attach -t overnight
 ```
+
+The run logs itself to `results/logs/overnight_<RUN_ID>.log` (no `tee` needed). At the end it bundles every log of the run (this log, each variant's vLLM server and benchmark logs, `sweep_status.txt`, `run_manifest.json`) into `results/run_logs_<RUN_ID>.tar.gz`; commit that archive, while the raw logs stay gitignored. Each quantized checkpoint's SHA256 manifest is copied to `results/checkpoint_manifests/`, and `results/run_manifest.json` records the git commit, GPU, driver, and package versions.
 
 Useful flags:
 
@@ -334,12 +338,27 @@ Useful flags:
 * `QUANTIZE_MISSING=1` - Stage 1 builds any AWQ checkpoint that is not already on disk (~25 min each).
 * `QUANTIZE_LLAMA=1` - also build the Llama AWQ checkpoints (cross-family track).
 * `OPENAI_API_KEY=sk-...` - enables Stage 3 LLM-as-judge scoring; if unset, judge is skipped and only HPML metrics are produced.
+* `LOCK_GPU_CLOCK=<MHz>` - pin the SM clock for every variant. The L4's base clock is 795 MHz and its boost 2,040 MHz under a 72 W cap, so lock at the clock the card actually sustains on this workload: run the pre-flight below while watching `nvidia-smi --query-gpu=clocks.sm,power.draw --format=csv -l 1`.
+* `RUN_L2_ABLATION=0` / `RUN_L3_SWEEP=0` - skip the L2 FP8 ablation or the L3 resolution sweep group.
+
+**Pre-flight (do this first, ~30 min).** It checks the judge snapshot, the new CSV columns, and the cache-reset endpoints against the live server before committing to the full run:
+
+```bash
+export OPENAI_API_KEY=sk-...
+python -m benchmark.llm_judge --limit 5 --passes 1    # judge snapshot alive + new columns
+BENCH_ARGS="--limit 1 --repeats 2" bash scripts/serve_and_bench.sh L0_baseline
+# Expect no "[ERROR] /reset_prefix_cache not available" line in the output, and in
+# results/summary.csv: cold_cache=1 plus non-empty finish_reason, prompt_tokens,
+# completion_tokens, and kv_cache_usage_peak.
+```
 
 If you only want to rerun the benchmark/eval pass (checkpoints already on disk):
 
 ```bash
-CLEAN_RESULTS=1 QUANTIZE_MISSING=0 bash scripts/overnight.sh 2>&1 | tee results/overnight.log
+CLEAN_RESULTS=1 QUANTIZE_MISSING=0 bash scripts/overnight.sh
 ```
+
+**Cold-cache timing.** vLLM's V1 engine enables prefix caching by default, so a repeated identical request would reuse the cached prompt (image included) and skip most of its processing. The harness therefore clears vLLM's caches before every timed call through its dev-mode endpoints (`serve_and_bench.sh` starts vLLM with `VLLM_SERVER_DEV_MODE=1`), and records `cold_cache=1` per scenario when every reset succeeded. Pass `--warm-cache` to the harness to measure warm repeat-request latency instead.
 
 Manual fallback - run a single variant at a time:
 
@@ -383,7 +402,7 @@ ls results/plots
 We instrumented every variant with three complementary tools.
 
 * **PyTorch Profiler** (`torch.profiler`) for ViT op level timeline traces. View in `chrome://tracing` or perfetto.dev.
-* **vLLM Prometheus `/metrics` endpoint** for TTFT, ITL, key value cache utilization, and `gpu_cache_usage_pct`. Scraped per variant by [`benchmark/hpml_metrics.py`](benchmark/hpml_metrics.py).
+* **vLLM Prometheus `/metrics` endpoint** for TTFT, ITL, peak key value cache usage (sampled while a request runs), preemption count (0 means a variant never ran short of KV cache memory), and prefix-cache hit rate. Scraped per variant by [`benchmark/hpml_metrics.py`](benchmark/hpml_metrics.py). Note that `nvidia-smi` total VRAM is nearly constant across variants because vLLM reserves a fixed share of the GPU at startup; the weight and KV-cache split comes from [`scripts/vram_evidence.py`](scripts/vram_evidence.py).
 * **Weights and Biases** for run level tracking of the above plus accuracy and the LLM as judge mean score.
 
 ```bash
@@ -399,7 +418,7 @@ python -m benchmark.profile_single --variant L0_baseline
 
 ### G. Quickstart: Reproduce the Headline Result
 
-End-to-end on a fresh GCP L4 VM, the whole pipeline (10 variants, both families, LLM-as-judge, plots, W&B summary) is one command inside tmux:
+End-to-end on a fresh GCP L4 VM, the whole pipeline (21 variants across both families, LLM-as-judge, plots, W&B summary) is one command inside tmux. Run the pre-flight from Section E first:
 
 ```bash
 # 1. Provision the GCP L4 VM (creates VM + firewall, ~3-5 min for driver install)
@@ -415,7 +434,7 @@ tmux new -s overnight
 cd ~/hpml-final-project
 export OPENAI_API_KEY=sk-...           # optional, enables LLM-as-judge
 CLEAN_RESULTS=1 QUANTIZE_MISSING=1 QUANTIZE_LLAMA=1 \
-  bash scripts/overnight.sh 2>&1 | tee results/overnight.log
+  bash scripts/overnight.sh            # logs itself to results/logs/
 
 # Detach: Ctrl-b d. Reattach: tmux attach -t overnight
 
@@ -433,7 +452,7 @@ If you only want the Qwen 3-variant headline (FP16, domain INT4, generic INT4) w
 
 ### What worked
 
-**Domain calibrated AWQ W4A16 on Qwen is the headline win.** Mean end to end latency drops from 9.44 s to 4.75 s, a 1.99x speedup, and LLM as judge accuracy improves from 47.7% (21/44) to 81.8% (36/44), an absolute +34.1 pp gain. Qwen is the family that responds best to INT4 quantization on task quality.
+**Domain calibrated AWQ W4A16 on Qwen is the headline speedup.** Mean end to end latency drops from 9.44 s to 4.75 s, a 1.99x speedup. Its judge pass rate was also higher than FP16 (81.8% vs 47.7%), but we do not claim that quantization improves accuracy. A 4-bit model approximates the FP16 one, the generic-calibrated model gained too (72.7%), the gain is six scenarios that all flipped from fail to pass on a single judge pass (exact McNemar p = 0.031), and repeated judge passes over identical baseline answers disagreed. The baseline itself shows no sign of being broken: no errors, timeouts, or empty answers. The three-pass re-run plus a human-labelled check will decide whether the gain is real.
 
 **AWQ W4A16 is a reliable speedup mechanism on both families.** Qwen domain achieves 1.99x and Llama generic achieves 2.92x mean speedup; Llama domain achieves 2.46x. The latency win is real on every variant; accuracy depends on the calibration regime.
 
@@ -447,11 +466,11 @@ If you only want the Qwen 3-variant headline (FP16, domain INT4, generic INT4) w
 
 **Llama responds asymmetrically to INT4 calibration.** With domain calibration, Llama L1d improves slightly to 59.1% (26/44) vs the 52.3% (23/44) FP16 baseline. With generic calibration, Llama L1g drops to 40.0% (16/40), well below FP16. So INT4 is *not* universally harmful on Llama — but it is brittle, and the calibration corpus matters more than on Qwen. We suspect the LLaVA NeXT vision tower interaction with the INT4 text tower is more sensitive to calibration distribution than Qwen's native ViT integration, but we did not isolate the cause within the project window.
 
-**The L2 full bundle serving tuning broke generation on Qwen.** Combining prefix caching, chunked prefill, FP8 key value cache, and a 0.90 GPU memory utilization budget gave the fastest p50 latency of any variant (1,157 ms), but LLM as judge accuracy collapsed to 0/44 across all twenty-two scenarios. The same bundle on Llama did not collapse but also did not help (mean latency 8,860 ms, 20/44 = 45.5% accuracy, a 7 pp drop from FP16). The bundle needs to be unstacked and tuned per component before it is safe to use; we suspect the FP8 KV-cache quantization corrupts the long visual-token prefix.
+**The L2 full bundle serving tuning broke generation on Qwen.** Combining prefix caching, chunked prefill, FP8 key value cache, and a 0.90 GPU memory utilization budget gave the fastest p50 latency of any variant (1,157 ms), but LLM as judge accuracy collapsed to 0/44 across all twenty-two scenarios. The same bundle on Llama did not collapse but also did not help (mean latency 8,860 ms, 20/44 = 45.5% accuracy, a 7 pp drop from FP16). The cause is suspected, not yet isolated. Under vLLM 0.19's V1 engine, prefix caching and chunked prefill are on by default, so the FP16 baseline already ran with both; the FP8 key value cache is the bundle's only correctness-relevant change. The broken outputs were degenerate: pump and motor answers collapsed to the garbage token `addCriterion`, turbine answers stopped after one word, and transformer answers stayed partly coherent. Failure on the more uniform images (plain grayscale castings, thermal images, blades against sky) matches the pattern in [vLLM issue #41343](https://github.com/vllm-project/vllm/issues/41343), which documents FP8 KV-cache output corruption on Qwen2-VL and Qwen2.5-VL with default scaling. The sweep now includes an ablation to isolate it: FP8 alone, FP8 with `--calculate-kv-scales`, FP8 without prefix caching, the full bundle with dynamic scales, and an FP8-only Llama control.
 
-**L3 image preprocessing at 512 px gave no measurable speedup.** Qwen at 512 px ran slightly slower than the FP16 baseline (9,920 ms vs 9,437 ms mean), and Llama at 512 px was effectively unchanged (9,278 ms vs 9,203 ms). Fixed-tile vision encoders do not sufficiently reduce visual-token count at 512 px; the "knee" is likely between 256 and 384 px.
+**L3 image preprocessing at 512 px gave no speedup, for a mundane reason.** Half the scenario images (pumps at 512 px, motors at 320 px) are already at or below 512 px, so for those 11 Qwen scenarios L3 sent byte-identical requests and got byte-identical answers. On the other 11 (transformers and turbines), Qwen2.5-VL, which uses dynamic resolution rather than fixed tiles, did receive fewer image tokens, but the model wrote longer answers about the smaller images. The per-scenario change in latency tracks the change in answer length (correlation 0.93), so Qwen's mean slowdown (9,920 ms vs 9,437 ms) is an output-length effect, not an encoder property. Llama at 512 px was effectively unchanged (9,278 ms vs 9,203 ms). The sweep now covers 256, 384, 512, 768, and 1024 px on both families and logs image-token counts.
 
-**Generic AWQ calibration on Llama L1g hit a token-cap runaway.** Two L1g transformer scenarios timed out at ~122 seconds, which is why the L1g denominator is 40 (not 44) in §3.2. Domain calibration did not exhibit this failure mode on any scenario, reinforcing the case for domain-matched calibration in production.
+**Generic AWQ calibration on Llama L1g returned empty answers.** Two L1g transformer scenarios came back empty after about one second, with no error raised. The original judge skipped empty answers, which is why the L1g denominator is 40 (not 44) in §3.2 and why its accuracy was slightly inflated; the judge now scores an empty answer as a fail. Domain calibration did not exhibit this failure mode on any scenario. Whether that comes from the corpus topic or from its much smaller size is untested (see the calibration note in Section 2).
 
 **Quantizing the vision tower or `multi_modal_projector` to INT4 broke generation.** This is well documented for LLaVA family encoders. We kept them at FP16 via `ignore=["re:.*vision_tower.*","re:.*multi_modal_projector.*"]`.
 
@@ -472,7 +491,7 @@ The most consequential of these is bug #2: llmcompressor 0.3.0 silently produced
 
 ### Next steps
 
-Submit a pull request to the upstream [IBM/AssetOpsBench](https://github.com/IBM/AssetOpsBench) repository registering the Visual Inspection Agent in AgentHive so it gets dispatched through the standard MetaAgent orchestrator. Run the motor thermal scenarios through the headline harness so all 22 authored scenarios are covered in a single sweep. Investigate the Qwen versus Llama asymmetry under INT4 quantization, possibly by isolating per layer error introduced by the calibration. Decompose the L2 bundle into per component variants to find which combination triggers the Qwen accuracy collapse. Explore whether INT8 (W8A8) preserves accuracy better than INT4 while still fitting on a single L4 with usable key value cache headroom.
+Submit a pull request to the upstream [IBM/AssetOpsBench](https://github.com/IBM/AssetOpsBench) repository registering the Visual Inspection Agent in AgentHive so it gets dispatched through the standard MetaAgent orchestrator. Investigate the Qwen versus Llama asymmetry under INT4 quantization, possibly by isolating per layer error introduced by the calibration, and run a calibration study that separates corpus topic from corpus size. Report the L2 ablation results from the re-run and add them to [vLLM issue #41343](https://github.com/vllm-project/vllm/issues/41343). Explore whether INT8 (W8A8) preserves accuracy better than INT4 while still fitting on a single L4 with usable key value cache headroom.
 
 ![Pareto: latency vs accuracy](results/plots/pareto.png)
 ![Weight VRAM breakdown](results/plots/vram_breakdown.png)

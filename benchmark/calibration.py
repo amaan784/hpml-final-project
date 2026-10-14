@@ -1,7 +1,13 @@
 # Calibration corpora for AWQ/GPTQ/SmoothQuant.
-# Domain corpus: substation + pump impeller + turbine blade. Generic: ultrachat.
+# Domain corpus: 40 unique short substation/transformer sentences, cycled to
+# num_samples (128 by default, so each sentence repeats ~3 times; a few
+# thousand tokens in total). It contains no pump, motor, or turbine text, and
+# a few sentences describe the multi-panel layout of the transformer test
+# images. Generic corpus: num_samples ultrachat_200k conversations of up to
+# 8000 chars each -- far more and more varied text, so domain-vs-generic
+# comparisons confound topic with corpus size.
 # Text-only because the recipe quantizes only the LLM tower (vision_tower
-# and multi_modal_projector are ignored).
+# and multi_modal_projector are ignored); no images are used.
 
 from typing import Iterable
 
